@@ -1,0 +1,10 @@
+[project]
+name = "kenpro-store"
+version = "0.1.0"
+requires-python = ">=3.14"
+dependencies = [
+    "django>=6.0.6",
+    "djangorestframework>=3.17.1",
+    "djangorestframework-stubs>=3.17.0",
+    "drf-spectacular>=0.29.0",
+]
