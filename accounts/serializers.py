@@ -1,7 +1,7 @@
 from django.contrib.auth.models import Permission
 from rest_framework import serializers
 
-from .models import Membership, PinScope, Role, RolePermission, Tenant, User
+from .models import Membership, PinScope, Plan, Role, RolePermission, ServiceFlag, Subscription, Tenant, User
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -149,3 +149,59 @@ class PinScopeSerializer(serializers.ModelSerializer):
 
     def get_content_type_label(self, obj) -> str:
         return str(obj.content_type)
+
+
+# ---------------------------------------------------------------------------
+# Back-office Super Admin
+# ---------------------------------------------------------------------------
+
+class PlanSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Plan
+        fields = ["id", "name", "monthly_price", "description", "is_active", "created_at"]
+        read_only_fields = ["id", "created_at"]
+
+
+class SubscriptionSerializer(serializers.ModelSerializer):
+    is_in_trial = serializers.BooleanField(read_only=True)
+    trial_expired = serializers.BooleanField(read_only=True)
+    plan_name = serializers.CharField(source="plan.name", read_only=True)
+
+    class Meta:
+        model = Subscription
+        fields = [
+            "id", "tenant", "plan", "plan_name", "status",
+            "trial_ends_at", "current_period_start", "current_period_end",
+            "is_in_trial", "trial_expired",
+            "created_at", "updated_at",
+        ]
+        read_only_fields = [
+            "id", "plan_name", "is_in_trial", "trial_expired",
+            "created_at", "updated_at",
+        ]
+
+
+class StartTrialSerializer(serializers.Serializer):
+    tenant = serializers.UUIDField()
+    plan = serializers.UUIDField()
+    trial_days = serializers.IntegerField(min_value=0, required=False)
+
+
+class ActivateSerializer(serializers.Serializer):
+    plan = serializers.UUIDField(required=False)
+
+
+class ExtendTrialSerializer(serializers.Serializer):
+    extra_days = serializers.IntegerField(min_value=1)
+
+
+class ServiceFlagSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ServiceFlag
+        fields = ["id", "tenant", "service", "is_enabled", "created_at", "updated_at"]
+        read_only_fields = ["id", "created_at", "updated_at"]
+
+
+class ServiceFlagInputSerializer(serializers.Serializer):
+    tenant = serializers.UUIDField()
+    service = serializers.CharField(max_length=50)

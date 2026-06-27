@@ -1,11 +1,15 @@
 """
 App `crm` — Gestion de la relation client de KENPRO.
 
-Modèles : Customer.
+Modèles : Customer, DebtMovement.
 """
+from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.db import models
 
 from kenpro_store.db import TenantOwnedModel
+
+User = settings.AUTH_USER_MODEL
 
 
 class Customer(TenantOwnedModel):
@@ -82,6 +86,15 @@ class Customer(TenantOwnedModel):
         verbose_name="Notes",
     )
 
+    # Solde de dette courant — mis à jour par DebtService à chaque mouvement.
+    # Positif = le client doit de l'argent à la boutique.
+    debt_balance = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        default=0,
+        verbose_name="Solde de dette",
+    )
+
     # --- Meta & représentation ------------------------------------------
 
     class Meta:
@@ -90,5 +103,64 @@ class Customer(TenantOwnedModel):
         verbose_name_plural = "Clients"
 
     def __str__(self) -> str:
-        # Affichage : "Nom (téléphone)" pour un repérage immédiat
         return f"{self.name} ({self.phone})"
+
+
+class DebtMovement(TenantOwnedModel):
+    """
+    Écriture de dette client — append-only.
+    Chaque vente à crédit, remboursement ou ajustement crée une ligne.
+    Le solde du Customer est recalculé par DebtService après chaque écriture.
+    """
+
+    class Type(models.TextChoices):
+        SALE = "sale", "Vente à crédit"
+        REPAYMENT = "repayment", "Remboursement"
+        ADJUSTMENT = "adjustment", "Ajustement"
+
+    customer = models.ForeignKey(
+        Customer,
+        on_delete=models.PROTECT,
+        related_name="debt_movements",
+        verbose_name="Client",
+    )
+    type = models.CharField(
+        max_length=20,
+        choices=Type.choices,
+        verbose_name="Type",
+    )
+    # Montant positif = dette augmente ; négatif = dette diminue.
+    amount = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        verbose_name="Montant",
+    )
+    # Référence libre vers la vente ou le paiement d'origine.
+    reference = models.CharField(max_length=255, blank=True, verbose_name="Référence")
+    note = models.CharField(max_length=500, blank=True, verbose_name="Note")
+    recorded_by = models.ForeignKey(
+        User,
+        on_delete=models.PROTECT,
+        related_name="+",
+        verbose_name="Enregistré par",
+    )
+
+    class Meta:
+        ordering = ["created_at"]
+        verbose_name = "Mouvement de dette"
+        verbose_name_plural = "Mouvements de dette"
+
+    def __str__(self) -> str:
+        return f"{self.get_type_display()} {self.amount} — {self.customer}"
+
+    def save(self, *args, **kwargs):
+        if self.pk and DebtMovement.objects.filter(pk=self.pk).exists():
+            raise ValidationError(
+                "DebtMovement est en lecture seule après création (append-only)."
+            )
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):  # noqa: ARG002
+        raise ValidationError(
+            "La suppression d'un DebtMovement est interdite (piste d'audit)."
+        )

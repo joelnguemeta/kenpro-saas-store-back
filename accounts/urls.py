@@ -9,8 +9,11 @@ from .views import (
     PinResetConfirmView,
     PinResetRequestView,
     PinScopeViewSet,
+    PlanViewSet,
     RegisterView,
     RoleViewSet,
+    ServiceFlagViewSet,
+    SubscriptionViewSet,
     TenantViewSet,
     UserViewSet,
 )
@@ -21,6 +24,10 @@ router.register("tenants", TenantViewSet, basename="tenant")
 router.register("roles", RoleViewSet, basename="role")
 router.register("memberships", MembershipViewSet, basename="membership")
 router.register("pin-scopes", PinScopeViewSet, basename="pinscope")
+# Back-office Super Admin
+router.register("admin/plans", PlanViewSet, basename="plan")
+router.register("admin/subscriptions", SubscriptionViewSet, basename="subscription")
+router.register("admin/service-flags", ServiceFlagViewSet, basename="serviceflag")
 
 urlpatterns = [
     path("register/", RegisterView.as_view(), name="register"),

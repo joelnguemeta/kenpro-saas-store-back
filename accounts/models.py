@@ -1,8 +1,13 @@
+import hashlib
 import uuid
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin
 from django.contrib.contenttypes.models import ContentType
 from django.db import models
 from django.utils import timezone
+
+
+def _hash_token(raw: str) -> str:
+    return hashlib.sha256(raw.encode()).hexdigest()
 
 from .managers import UserManager
 
@@ -54,6 +59,124 @@ class Tenant(models.Model):
 
     def __str__(self):
         return self.name
+
+
+class Plan(models.Model):
+    """
+    Plan d'abonnement proposé par l'éditeur (ex. Starter, Pro, Enterprise).
+    Définit le prix mensuel et les limites associées.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=100, unique=True)
+    monthly_price = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    description = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Plan"
+        verbose_name_plural = "Plans"
+        ordering = ["monthly_price"]
+
+    def __str__(self):
+        return self.name
+
+
+class Subscription(models.Model):
+    """
+    Abonnement d'un tenant à un plan.
+    Un seul abonnement actif à la fois par tenant.
+
+    Cycle de vie :
+      trial   → active (conversion après période de gratuité)
+      active  → suspended (impayé ou désactivation manuelle)
+      suspended → active (réactivation)
+
+    trial_ends_at non null = période de gratuité en cours ou passée.
+    """
+
+    class Status(models.TextChoices):
+        TRIAL = "trial", "Période d'essai"
+        ACTIVE = "active", "Actif"
+        SUSPENDED = "suspended", "Suspendu"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.OneToOneField(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name="subscription",
+    )
+    plan = models.ForeignKey(
+        Plan,
+        on_delete=models.PROTECT,
+        related_name="subscriptions",
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.TRIAL,
+    )
+    # Date de fin de la période gratuite — NULL = pas de gratuité.
+    trial_ends_at = models.DateTimeField(null=True, blank=True)
+    # Début de la période payante (renseigné lors de la conversion).
+    current_period_start = models.DateTimeField(null=True, blank=True)
+    current_period_end = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Abonnement"
+        verbose_name_plural = "Abonnements"
+
+    def __str__(self):
+        return f"{self.tenant.name} — {self.plan.name} ({self.get_status_display()})"
+
+    @property
+    def is_in_trial(self) -> bool:
+        from django.utils import timezone
+        return self.status == self.Status.TRIAL and (
+            self.trial_ends_at is None or timezone.now() <= self.trial_ends_at
+        )
+
+    @property
+    def trial_expired(self) -> bool:
+        from django.utils import timezone
+        return self.status == self.Status.TRIAL and (
+            self.trial_ends_at is not None and timezone.now() > self.trial_ends_at
+        )
+
+
+class ServiceFlag(models.Model):
+    """
+    Active ou désactive un service métier vertical pour un tenant donné.
+    Chaque service (ex. 'repair', 'supplier') a un flag par tenant.
+    Un service absent = désactivé par défaut.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name="service_flags",
+    )
+    # Identifiant court du service métier, ex : "repair", "supplier", "loyalty".
+    service = models.CharField(max_length=50)
+    is_enabled = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Flag de service"
+        verbose_name_plural = "Flags de service"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "service"],
+                name="unique_service_flag_per_tenant",
+            ),
+        ]
+
+    def __str__(self):
+        state = "activé" if self.is_enabled else "désactivé"
+        return f"{self.service} {state} — {self.tenant.name}"
 
 
 class Role(models.Model):
@@ -218,7 +341,8 @@ class PasswordResetToken(models.Model):
         on_delete=models.CASCADE,
         related_name="password_reset_tokens",
     )
-    token = models.CharField(max_length=64, unique=True)
+    # SHA-256 du jeton transmis par email — jamais le jeton brut en DB.
+    token_hash = models.CharField(max_length=64, unique=True)
     created_at = models.DateTimeField(auto_now_add=True)
     expires_at = models.DateTimeField()
     used = models.BooleanField(default=False)
@@ -247,8 +371,8 @@ class PinResetToken(models.Model):
         on_delete=models.CASCADE,
         related_name="pin_reset_tokens",
     )
-    # Jeton aléatoire transmis dans le lien email (non haché — durée de vie courte)
-    token = models.CharField(max_length=64, unique=True)
+    # SHA-256 du jeton transmis par email — jamais le jeton brut en DB.
+    token_hash = models.CharField(max_length=64, unique=True)
     created_at = models.DateTimeField(auto_now_add=True)
     expires_at = models.DateTimeField()
     used = models.BooleanField(default=False)

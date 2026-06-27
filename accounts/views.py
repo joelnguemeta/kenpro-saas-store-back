@@ -9,8 +9,10 @@ from rest_framework.views import APIView
 from kenpro_store.enums import ErrorCode, SuccessMessage
 from kenpro_store.responses import ErrorResponse, SuccessResponse
 
-from .models import Membership, PinScope, Role, Tenant, User
+from .models import Membership, PinScope, Plan, Role, ServiceFlag, Subscription, Tenant, User
 from .serializers import (
+    ActivateSerializer,
+    ExtendTrialSerializer,
     MembershipSerializer,
     PasswordChangeSerializer,
     PasswordResetConfirmSerializer,
@@ -18,15 +20,27 @@ from .serializers import (
     PinResetConfirmSerializer,
     PinResetRequestSerializer,
     PinScopeSerializer,
+    PlanSerializer,
     RegisterSerializer,
     RoleSerializer,
+    ServiceFlagInputSerializer,
+    ServiceFlagSerializer,
     SetPinSerializer,
+    StartTrialSerializer,
+    SubscriptionSerializer,
     TenantSerializer,
     UserCreateSerializer,
     UserSerializer,
     VerifyPinSerializer,
 )
-from .services import MembershipService, PasswordChangeService, PasswordResetService, PinResetService
+from .services import (
+    MembershipService,
+    PasswordChangeService,
+    PasswordResetService,
+    PinResetService,
+    ServiceFlagService,
+    SubscriptionService,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -613,3 +627,188 @@ class MembershipViewSet(_SuccessModelViewSet):
 class PinScopeViewSet(_SuccessModelViewSet):
     queryset = PinScope.objects.select_related("tenant", "content_type").order_by("tenant__name")
     serializer_class = PinScopeSerializer
+
+
+# ---------------------------------------------------------------------------
+# Back-office Super Admin — Plans
+# ---------------------------------------------------------------------------
+
+_TAG_ADMIN = "Super Admin"
+
+
+@extend_schema_view(
+    list=extend_schema(summary="Lister les plans", tags=[_TAG_ADMIN]),
+    retrieve=extend_schema(summary="Détail d'un plan", tags=[_TAG_ADMIN]),
+    create=extend_schema(summary="Créer un plan", tags=[_TAG_ADMIN]),
+    update=extend_schema(summary="Modifier un plan", tags=[_TAG_ADMIN]),
+    partial_update=extend_schema(summary="Modifier un plan (partiel)", tags=[_TAG_ADMIN]),
+    destroy=extend_schema(summary="Supprimer un plan", tags=[_TAG_ADMIN]),
+)
+class PlanViewSet(_SuccessModelViewSet):
+    queryset = Plan.objects.order_by("monthly_price")
+    serializer_class = PlanSerializer
+
+
+# ---------------------------------------------------------------------------
+# Back-office Super Admin — Abonnements
+# ---------------------------------------------------------------------------
+
+@extend_schema_view(
+    list=extend_schema(summary="Lister les abonnements", tags=[_TAG_ADMIN]),
+    retrieve=extend_schema(summary="Détail d'un abonnement", tags=[_TAG_ADMIN]),
+)
+class SubscriptionViewSet(viewsets.ReadOnlyModelViewSet):
+    queryset = Subscription.objects.select_related("tenant", "plan").order_by("-created_at")
+    serializer_class = SubscriptionSerializer
+
+    def list(self, request, *args, **kwargs):
+        qs = self.filter_queryset(self.get_queryset())
+        # Filtres query params
+        status_param = request.query_params.get("status")
+        if status_param:
+            qs = qs.filter(status=status_param)
+        page = self.paginate_queryset(qs)
+        if page is not None:
+            return self.get_paginated_response(SubscriptionSerializer(page, many=True).data)
+        return SuccessResponse(data=SubscriptionSerializer(qs, many=True).data)
+
+    def retrieve(self, request, *args, **kwargs):
+        return SuccessResponse(data=SubscriptionSerializer(self.get_object()).data)
+
+    @extend_schema(
+        summary="Démarrer la période d'essai d'un tenant",
+        request=StartTrialSerializer,
+        tags=[_TAG_ADMIN],
+    )
+    @action(detail=False, methods=["post"], url_path="start-trial")
+    def start_trial(self, request):
+        s = StartTrialSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        d = s.validated_data
+        try:
+            tenant = Tenant.objects.get(pk=d["tenant"])
+            plan = Plan.objects.get(pk=d["plan"])
+            sub = SubscriptionService.start_trial(tenant, plan, d.get("trial_days"))
+        except (Tenant.DoesNotExist, Plan.DoesNotExist) as exc:
+            return ErrorResponse(error_code=ErrorCode.NOT_FOUND, message=str(exc))
+        except ValueError as exc:
+            return ErrorResponse(error_code=ErrorCode.CONFLICT, message=str(exc))
+        return SuccessResponse(
+            data=SubscriptionSerializer(sub).data,
+            message=SuccessMessage.CREATED,
+            status_code=status.HTTP_201_CREATED,
+        )
+
+    @extend_schema(
+        summary="Activer / convertir un abonnement",
+        request=ActivateSerializer,
+        tags=[_TAG_ADMIN],
+    )
+    @action(detail=True, methods=["post"], url_path="activate")
+    def activate(self, request, pk=None):
+        sub = self.get_object()
+        s = ActivateSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        plan = None
+        if plan_id := s.validated_data.get("plan"):
+            try:
+                plan = Plan.objects.get(pk=plan_id)
+            except Plan.DoesNotExist:
+                return ErrorResponse(error_code=ErrorCode.NOT_FOUND, message="Plan introuvable.")
+        try:
+            sub = SubscriptionService.activate(sub, plan)
+        except ValueError as exc:
+            return ErrorResponse(error_code=ErrorCode.BAD_REQUEST, message=str(exc))
+        return SuccessResponse(data=SubscriptionSerializer(sub).data, message="Abonnement activé.")
+
+    @extend_schema(
+        summary="Suspendre un abonnement",
+        tags=[_TAG_ADMIN],
+    )
+    @action(detail=True, methods=["post"], url_path="suspend")
+    def suspend(self, request, pk=None):
+        sub = self.get_object()
+        try:
+            sub = SubscriptionService.suspend(sub)
+        except ValueError as exc:
+            return ErrorResponse(error_code=ErrorCode.BAD_REQUEST, message=str(exc))
+        return SuccessResponse(data=SubscriptionSerializer(sub).data, message="Abonnement suspendu.")
+
+    @extend_schema(
+        summary="Prolonger la période d'essai",
+        request=ExtendTrialSerializer,
+        tags=[_TAG_ADMIN],
+    )
+    @action(detail=True, methods=["post"], url_path="extend-trial")
+    def extend_trial(self, request, pk=None):
+        sub = self.get_object()
+        s = ExtendTrialSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        try:
+            sub = SubscriptionService.extend_trial(sub, s.validated_data["extra_days"])
+        except ValueError as exc:
+            return ErrorResponse(error_code=ErrorCode.BAD_REQUEST, message=str(exc))
+        return SuccessResponse(data=SubscriptionSerializer(sub).data, message="Essai prolongé.")
+
+
+# ---------------------------------------------------------------------------
+# Back-office Super Admin — Flags de services métier
+# ---------------------------------------------------------------------------
+
+@extend_schema_view(
+    list=extend_schema(summary="Lister les flags de services", tags=[_TAG_ADMIN]),
+    retrieve=extend_schema(summary="Détail d'un flag", tags=[_TAG_ADMIN]),
+)
+class ServiceFlagViewSet(viewsets.ReadOnlyModelViewSet):
+    queryset = ServiceFlag.objects.select_related("tenant").order_by("tenant__name", "service")
+    serializer_class = ServiceFlagSerializer
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        if tenant_id := self.request.query_params.get("tenant"):
+            qs = qs.filter(tenant=tenant_id)
+        if service := self.request.query_params.get("service"):
+            qs = qs.filter(service=service)
+        return qs
+
+    def list(self, request, *args, **kwargs):
+        qs = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(qs)
+        if page is not None:
+            return self.get_paginated_response(ServiceFlagSerializer(page, many=True).data)
+        return SuccessResponse(data=ServiceFlagSerializer(qs, many=True).data)
+
+    def retrieve(self, request, *args, **kwargs):
+        return SuccessResponse(data=ServiceFlagSerializer(self.get_object()).data)
+
+    @extend_schema(
+        summary="Activer un service métier pour un tenant",
+        request=ServiceFlagInputSerializer,
+        tags=[_TAG_ADMIN],
+    )
+    @action(detail=False, methods=["post"], url_path="enable")
+    def enable(self, request):
+        s = ServiceFlagInputSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        try:
+            tenant = Tenant.objects.get(pk=s.validated_data["tenant"])
+        except Tenant.DoesNotExist:
+            return ErrorResponse(error_code=ErrorCode.NOT_FOUND, message="Tenant introuvable.")
+        flag = ServiceFlagService.enable(tenant, s.validated_data["service"])
+        return SuccessResponse(data=ServiceFlagSerializer(flag).data, message="Service activé.")
+
+    @extend_schema(
+        summary="Désactiver un service métier pour un tenant",
+        request=ServiceFlagInputSerializer,
+        tags=[_TAG_ADMIN],
+    )
+    @action(detail=False, methods=["post"], url_path="disable")
+    def disable(self, request):
+        s = ServiceFlagInputSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        try:
+            tenant = Tenant.objects.get(pk=s.validated_data["tenant"])
+        except Tenant.DoesNotExist:
+            return ErrorResponse(error_code=ErrorCode.NOT_FOUND, message="Tenant introuvable.")
+        flag = ServiceFlagService.disable(tenant, s.validated_data["service"])
+        return SuccessResponse(data=ServiceFlagSerializer(flag).data, message="Service désactivé.")

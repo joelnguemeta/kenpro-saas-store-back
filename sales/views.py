@@ -20,6 +20,8 @@ from kenpro_store.enums import ErrorCode, SuccessMessage
 from kenpro_store.responses import ErrorResponse, SuccessResponse
 from kenpro_store.viewsets import TenantScopedViewSet
 
+from crm.services import DebtService
+
 from .models import Payment, Sale, SaleLine
 from .serializers import (
     CancelSaleSerializer,
@@ -257,7 +259,18 @@ class PaymentViewSet(TenantScopedViewSet):
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        serializer.save(tenant=self._require_tenant(), recorded_by=request.user)
+        payment = serializer.save(tenant=self._require_tenant(), recorded_by=request.user)
+
+        # Un paiement CREDIT impute la dette au client lié à la vente.
+        if payment.method == Payment.Method.CREDIT and payment.sale.customer_id:
+            customer = payment.sale.customer
+            DebtService.charge(
+                customer,
+                payment.amount,
+                reference=str(payment.sale_id),
+                recorded_by=request.user,
+            )
+
         return SuccessResponse(
             data=serializer.data,
             message=SuccessMessage.CREATED,

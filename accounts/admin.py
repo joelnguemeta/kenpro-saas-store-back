@@ -1,7 +1,7 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 
-from .models import Membership, PasswordResetToken, PinResetToken, PinScope, Role, RolePermission, Tenant, User
+from .models import Membership, PasswordResetToken, PinResetToken, PinScope, Plan, Role, RolePermission, ServiceFlag, Subscription, Tenant, User
 
 
 @admin.register(User)
@@ -63,7 +63,7 @@ class MembershipAdmin(admin.ModelAdmin):
 class PasswordResetTokenAdmin(admin.ModelAdmin):
     list_display = ("user", "created_at", "expires_at", "used", "is_valid")
     list_filter = ("used",)
-    readonly_fields = ("token", "created_at", "expires_at")
+    readonly_fields = ("token_hash", "created_at", "expires_at")
 
     @admin.display(boolean=True, description="Valide")
     def is_valid(self, obj):
@@ -74,7 +74,7 @@ class PasswordResetTokenAdmin(admin.ModelAdmin):
 class PinResetTokenAdmin(admin.ModelAdmin):
     list_display = ("membership", "created_at", "expires_at", "used", "is_valid")
     list_filter = ("used",)
-    readonly_fields = ("token", "created_at", "expires_at")
+    readonly_fields = ("token_hash", "created_at", "expires_at")
 
     @admin.display(boolean=True, description="Valide")
     def is_valid(self, obj):
@@ -86,3 +86,25 @@ class PinScopeAdmin(admin.ModelAdmin):
     list_display = ("tenant", "content_type", "label", "created_at")
     list_filter = ("tenant",)
     search_fields = ("label", "content_type__model")
+
+
+@admin.register(Plan)
+class PlanAdmin(admin.ModelAdmin):
+    list_display = ("name", "monthly_price", "is_active", "created_at")
+    list_filter = ("is_active",)
+    search_fields = ("name",)
+
+
+@admin.register(Subscription)
+class SubscriptionAdmin(admin.ModelAdmin):
+    list_display = ("tenant", "plan", "status", "trial_ends_at", "current_period_end", "created_at")
+    list_filter = ("status", "plan")
+    search_fields = ("tenant__name", "tenant__slug")
+    readonly_fields = ("created_at", "updated_at")
+
+
+@admin.register(ServiceFlag)
+class ServiceFlagAdmin(admin.ModelAdmin):
+    list_display = ("tenant", "service", "is_enabled", "updated_at")
+    list_filter = ("service", "is_enabled")
+    search_fields = ("tenant__name", "service")

@@ -10,22 +10,16 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.0/ref/settings/
 """
 
+import os
 from pathlib import Path
 
-# Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+SECRET_KEY = os.environ["DJANGO_SECRET_KEY"]
 
-# Quick-start development settings - unsuitable for production
-# See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/
+DEBUG = os.environ.get("DJANGO_DEBUG", "False") == "True"
 
-# SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-*udp-ja(um&c#9@psi9!+^)kk=t50t6&63jx8myd=wix9jixk6'
-
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
-
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = [h for h in os.environ.get("DJANGO_ALLOWED_HOSTS", "").split(",") if h]
 
 
 # Application definition
@@ -69,7 +63,6 @@ MIDDLEWARE = [
 
 # Vide = mode SaaS (sous-domaine ou header X-Tenant-Slug).
 # Renseigné = mode on-premise : un seul tenant pour ce déploiement.
-import os
 SINGLE_TENANT_SLUG = os.environ.get("SINGLE_TENANT_SLUG", "")
 
 # Chemins qui ne nécessitent pas de tenant résolu.

@@ -390,10 +390,10 @@ class PasswordResetAPITest(TenantAPITestCase):
     def test_confirm_reset_applique_nouveau_mot_de_passe(self):
         from accounts.services import PasswordResetService
         with self.settings(EMAIL_BACKEND=self.EMAIL_BACKEND):
-            token = PasswordResetService.request_reset("reset@example.com")
+            _, raw = PasswordResetService.request_reset("reset@example.com")
         r = self.client.post(
             PASSWORD_RESET_CONFIRM_URL,
-            {"token": token.token, "new_password": "nouveauMotDePasse123"},
+            {"token": raw, "new_password": "nouveauMotDePasse123"},
             format="json",
         )
         self.assertEqual(r.status_code, status.HTTP_200_OK)
@@ -513,13 +513,12 @@ class PinResetAPITest(TenantAPITestCase):
         self.assertEqual(r.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_confirm_reset_nouveau_pin_applique(self):
-        from accounts.models import PinResetToken
         from accounts.services import PinResetService
         with self.settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend"):
-            token = PinResetService.request_reset(self.membership)
+            _, raw = PinResetService.request_reset(self.membership)
         r = self.client.post(
             PIN_RESET_CONFIRM_URL,
-            {"token": token.token, "new_pin": "9182"},
+            {"token": raw, "new_pin": "9182"},
             format="json",
         )
         self.assertEqual(r.status_code, status.HTTP_200_OK)

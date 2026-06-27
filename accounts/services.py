@@ -13,7 +13,7 @@ from django.db import transaction
 from django.template.loader import render_to_string
 from django.utils import timezone
 
-from .models import Membership, PasswordResetToken, PinResetToken, PinScope, Role, RolePermission, Tenant, User
+from .models import Membership, PasswordResetToken, PinResetToken, PinScope, Plan, Role, RolePermission, ServiceFlag, Subscription, Tenant, User, _hash_token
 
 
 # ---------------------------------------------------------------------------
@@ -149,9 +149,11 @@ class PasswordResetService:
     TTL_MINUTES: int = getattr(settings, "PASSWORD_RESET_TOKEN_TTL_MINUTES", 15)
 
     @classmethod
-    def request_reset(cls, email: str) -> PasswordResetToken:
+    def request_reset(cls, email: str) -> tuple[PasswordResetToken, str]:
         """
         Cherche l'utilisateur par email, génère un jeton et envoie l'email.
+        Retourne (token_obj, raw_value) — raw_value est transmis par email,
+        jamais stocké en base.
         Lève ValueError si aucun compte n'est associé à cet email.
         """
         try:
@@ -164,11 +166,11 @@ class PasswordResetService:
         token_value = secrets.token_urlsafe(32)
         token = PasswordResetToken.objects.create(
             user=user,
-            token=token_value,
+            token_hash=_hash_token(token_value),
             expires_at=timezone.now() + timedelta(minutes=cls.TTL_MINUTES),
         )
         cls._send_email(user, token_value)
-        return token
+        return token, token_value
 
     @staticmethod
     def confirm_reset(token_value: str, new_password: str) -> User:
@@ -177,7 +179,7 @@ class PasswordResetService:
         Lève ValueError si le jeton est invalide, expiré ou déjà utilisé.
         """
         try:
-            token = PasswordResetToken.objects.select_related("user").get(token=token_value)
+            token = PasswordResetToken.objects.select_related("user").get(token_hash=_hash_token(token_value))
         except PasswordResetToken.DoesNotExist:
             raise ValueError("Jeton invalide.")
 
@@ -244,16 +246,17 @@ class PinResetService:
     TTL_MINUTES: int = getattr(settings, "PIN_RESET_TOKEN_TTL_MINUTES", 15)
 
     @classmethod
-    def request_reset(cls, membership: Membership) -> PinResetToken:
+    def request_reset(cls, membership: Membership) -> tuple[PinResetToken, str]:
         """
         Génère un jeton de réinitialisation et envoie un email à l'utilisateur.
+        Retourne (token_obj, raw_value) — raw_value est transmis par email,
+        jamais stocké en base.
         Lève ValueError si l'utilisateur n'a pas d'adresse email.
         """
         email = membership.user.email
         if not email:
             raise ValueError("Cet utilisateur n'a pas d'adresse email enregistrée.")
 
-        # Invalide les jetons précédents non utilisés pour ce membership
         PinResetToken.objects.filter(membership=membership, used=False).update(used=True)
 
         token_value = secrets.token_urlsafe(32)
@@ -261,12 +264,12 @@ class PinResetService:
 
         token = PinResetToken.objects.create(
             membership=membership,
-            token=token_value,
+            token_hash=_hash_token(token_value),
             expires_at=expires_at,
         )
 
         cls._send_email(email, token_value, membership)
-        return token
+        return token, token_value
 
     @staticmethod
     def confirm_reset(token_value: str, new_pin: str) -> Membership:
@@ -275,7 +278,7 @@ class PinResetService:
         Lève ValueError si le jeton est invalide, expiré ou déjà utilisé.
         """
         try:
-            token = PinResetToken.objects.select_related("membership").get(token=token_value)
+            token = PinResetToken.objects.select_related("membership").get(token_hash=_hash_token(token_value))
         except PinResetToken.DoesNotExist:
             raise ValueError("Jeton invalide.")
 
@@ -334,3 +337,129 @@ class PinScopeService:
     def is_protected(tenant: Tenant, model_class) -> bool:
         ct = ContentType.objects.get_for_model(model_class)
         return PinScope.objects.filter(tenant=tenant, content_type=ct).exists()
+
+
+# ---------------------------------------------------------------------------
+# Subscription (back-office Super Admin)
+# ---------------------------------------------------------------------------
+
+class SubscriptionService:
+    """
+    Pilote le cycle de vie des abonnements depuis le back-office Super Admin.
+    Toutes les mutations passent par ici.
+    """
+
+    DEFAULT_TRIAL_DAYS: int = getattr(settings, "DEFAULT_TRIAL_DAYS", 180)
+
+    @classmethod
+    @transaction.atomic
+    def start_trial(
+        cls,
+        tenant: Tenant,
+        plan: Plan,
+        trial_days: int | None = None,
+    ) -> Subscription:
+        """Crée l'abonnement initial en période d'essai pour un tenant."""
+        days = trial_days if trial_days is not None else cls.DEFAULT_TRIAL_DAYS
+        trial_ends_at = timezone.now() + timedelta(days=days) if days > 0 else None
+        sub, created = Subscription.objects.get_or_create(
+            tenant=tenant,
+            defaults={
+                "plan": plan,
+                "status": Subscription.Status.TRIAL,
+                "trial_ends_at": trial_ends_at,
+            },
+        )
+        if not created:
+            raise ValueError(f"Le tenant « {tenant.name} » a déjà un abonnement.")
+        return sub
+
+    @staticmethod
+    @transaction.atomic
+    def activate(subscription: Subscription, plan: Plan | None = None) -> Subscription:
+        """
+        Passe l'abonnement en 'active' (conversion après essai ou réactivation).
+        Change de plan si fourni.
+        """
+        if subscription.status == Subscription.Status.ACTIVE:
+            raise ValueError("L'abonnement est déjà actif.")
+        if plan:
+            subscription.plan = plan
+        subscription.status = Subscription.Status.ACTIVE
+        subscription.current_period_start = timezone.now()
+        subscription.current_period_end = timezone.now() + timedelta(days=30)
+        subscription.save(update_fields=[
+            "plan", "status", "current_period_start", "current_period_end", "updated_at",
+        ])
+        return subscription
+
+    @staticmethod
+    @transaction.atomic
+    def suspend(subscription: Subscription) -> Subscription:
+        """Suspend l'abonnement (impayé ou décision admin)."""
+        if subscription.status == Subscription.Status.SUSPENDED:
+            raise ValueError("L'abonnement est déjà suspendu.")
+        subscription.status = Subscription.Status.SUSPENDED
+        subscription.save(update_fields=["status", "updated_at"])
+        return subscription
+
+    @staticmethod
+    @transaction.atomic
+    def change_plan(subscription: Subscription, plan: Plan) -> Subscription:
+        """Change le plan sans modifier le statut."""
+        subscription.plan = plan
+        subscription.save(update_fields=["plan", "updated_at"])
+        return subscription
+
+    @staticmethod
+    @transaction.atomic
+    def extend_trial(subscription: Subscription, extra_days: int) -> Subscription:
+        """Prolonge la période d'essai d'un nombre de jours supplémentaires."""
+        if subscription.status != Subscription.Status.TRIAL:
+            raise ValueError("Seul un abonnement en essai peut être prolongé.")
+        if extra_days <= 0:
+            raise ValueError("Le nombre de jours doit être positif.")
+        base = max(subscription.trial_ends_at or timezone.now(), timezone.now())
+        subscription.trial_ends_at = base + timedelta(days=extra_days)
+        subscription.save(update_fields=["trial_ends_at", "updated_at"])
+        return subscription
+
+
+# ---------------------------------------------------------------------------
+# ServiceFlag (activation des services métier par tenant)
+# ---------------------------------------------------------------------------
+
+class ServiceFlagService:
+    """
+    Active ou désactive un service métier vertical pour un tenant.
+    Appelé par le Super Admin depuis le back-office.
+    """
+
+    @staticmethod
+    def enable(tenant: Tenant, service: str) -> ServiceFlag:
+        flag, _ = ServiceFlag.objects.update_or_create(
+            tenant=tenant,
+            service=service,
+            defaults={"is_enabled": True},
+        )
+        return flag
+
+    @staticmethod
+    def disable(tenant: Tenant, service: str) -> ServiceFlag:
+        flag, _ = ServiceFlag.objects.update_or_create(
+            tenant=tenant,
+            service=service,
+            defaults={"is_enabled": False},
+        )
+        return flag
+
+    @staticmethod
+    def is_enabled(tenant: Tenant, service: str) -> bool:
+        try:
+            return ServiceFlag.objects.get(tenant=tenant, service=service).is_enabled
+        except ServiceFlag.DoesNotExist:
+            return False
+
+    @staticmethod
+    def list_for_tenant(tenant: Tenant):
+        return ServiceFlag.objects.filter(tenant=tenant).order_by("service")

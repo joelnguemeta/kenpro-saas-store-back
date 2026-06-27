@@ -308,15 +308,15 @@ class PasswordResetServiceTest(TestCase):
 
     def test_confirm_reset_applique_nouveau_mot_de_passe(self):
         with self.settings(EMAIL_BACKEND=self.EMAIL_BACKEND):
-            token = PasswordResetService.request_reset("bob@example.com")
-        PasswordResetService.confirm_reset(token.token, "nouveauMotDePasse123")
+            token, raw = PasswordResetService.request_reset("bob@example.com")
+        PasswordResetService.confirm_reset(raw, "nouveauMotDePasse123")
         self.user.refresh_from_db()
         self.assertTrue(self.user.check_password("nouveauMotDePasse123"))
 
     def test_confirm_reset_invalide_le_jeton(self):
         with self.settings(EMAIL_BACKEND=self.EMAIL_BACKEND):
-            token = PasswordResetService.request_reset("bob@example.com")
-        PasswordResetService.confirm_reset(token.token, "nouveauMotDePasse123")
+            token, raw = PasswordResetService.request_reset("bob@example.com")
+        PasswordResetService.confirm_reset(raw, "nouveauMotDePasse123")
         token.refresh_from_db()
         self.assertTrue(token.used)
 
@@ -326,18 +326,18 @@ class PasswordResetServiceTest(TestCase):
 
     def test_confirm_reset_jeton_expire_leve_erreur(self):
         with self.settings(EMAIL_BACKEND=self.EMAIL_BACKEND):
-            token = PasswordResetService.request_reset("bob@example.com")
+            token, raw = PasswordResetService.request_reset("bob@example.com")
         token.expires_at = timezone.now() - timedelta(seconds=1)
         token.save()
         with self.assertRaises(ValueError):
-            PasswordResetService.confirm_reset(token.token, "motdepasse123")
+            PasswordResetService.confirm_reset(raw, "motdepasse123")
 
     def test_confirm_reset_jeton_deja_utilise_leve_erreur(self):
         with self.settings(EMAIL_BACKEND=self.EMAIL_BACKEND):
-            token = PasswordResetService.request_reset("bob@example.com")
-        PasswordResetService.confirm_reset(token.token, "motdepasse123")
+            token, raw = PasswordResetService.request_reset("bob@example.com")
+        PasswordResetService.confirm_reset(raw, "motdepasse123")
         with self.assertRaises(ValueError):
-            PasswordResetService.confirm_reset(token.token, "autreMotDePasse")
+            PasswordResetService.confirm_reset(raw, "autreMotDePasse")
 
 
 class PasswordChangeServiceTest(TestCase):
@@ -397,15 +397,15 @@ class PinResetServiceTest(TestCase):
 
     def test_confirm_reset_applique_nouveau_pin(self):
         with self.settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend"):
-            token = PinResetService.request_reset(self.membership)
-        PinResetService.confirm_reset(token.token, "9876")
+            token, raw = PinResetService.request_reset(self.membership)
+        PinResetService.confirm_reset(raw, "9876")
         self.membership.refresh_from_db()
         self.assertTrue(MembershipService.verify_pin(self.membership, "9876"))
 
     def test_confirm_reset_invalide_le_jeton(self):
         with self.settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend"):
-            token = PinResetService.request_reset(self.membership)
-        PinResetService.confirm_reset(token.token, "9876")
+            token, raw = PinResetService.request_reset(self.membership)
+        PinResetService.confirm_reset(raw, "9876")
         token.refresh_from_db()
         self.assertTrue(token.used)
 
@@ -415,23 +415,23 @@ class PinResetServiceTest(TestCase):
 
     def test_confirm_reset_jeton_deja_utilise_leve_erreur(self):
         with self.settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend"):
-            token = PinResetService.request_reset(self.membership)
-        PinResetService.confirm_reset(token.token, "1234")
+            token, raw = PinResetService.request_reset(self.membership)
+        PinResetService.confirm_reset(raw, "1234")
         with self.assertRaises(ValueError):
-            PinResetService.confirm_reset(token.token, "5678")
+            PinResetService.confirm_reset(raw, "5678")
 
     def test_confirm_reset_jeton_expire_leve_erreur(self):
         from datetime import timedelta
         with self.settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend"):
-            token = PinResetService.request_reset(self.membership)
+            token, raw = PinResetService.request_reset(self.membership)
         token.expires_at = timezone.now() - timedelta(seconds=1)
         token.save()
         with self.assertRaises(ValueError):
-            PinResetService.confirm_reset(token.token, "4321")
+            PinResetService.confirm_reset(raw, "4321")
 
     def test_token_is_valid_property(self):
         with self.settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend"):
-            token = PinResetService.request_reset(self.membership)
+            token, _ = PinResetService.request_reset(self.membership)
         self.assertTrue(token.is_valid)
         token.used = True
         token.save()
