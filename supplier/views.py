@@ -9,6 +9,7 @@ Particularités :
 """
 from drf_spectacular.utils import extend_schema, extend_schema_view
 from rest_framework import filters, status, viewsets
+from rest_framework.permissions import IsAdminUser, IsAuthenticated
 from rest_framework.decorators import action
 
 from kenpro_store.enums import ErrorCode, SuccessMessage
@@ -49,6 +50,12 @@ class SupplierViewSet(viewsets.ModelViewSet):
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ["name", "phone", "email"]
     ordering_fields = ["name", "created_at"]
+
+    def get_permissions(self):
+        # Read-only for any authenticated user; mutations require staff.
+        if self.action in ("list", "retrieve"):
+            return [IsAuthenticated()]
+        return [IsAdminUser()]
 
     def list(self, request, *args, **kwargs):
         qs = self.filter_queryset(self.get_queryset())

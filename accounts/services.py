@@ -109,7 +109,9 @@ class MembershipService:
         if not raw_pin or len(raw_pin) < 4:
             raise ValueError("Le PIN doit comporter au moins 4 caractères.")
         membership.pin = make_password(raw_pin)
-        membership.save(update_fields=["pin"])
+        membership.pin_failed_attempts = 0
+        membership.pin_locked_until = None
+        membership.save(update_fields=["pin", "pin_failed_attempts", "pin_locked_until"])
 
     @staticmethod
     def clear_pin(membership: Membership) -> None:
@@ -117,12 +119,35 @@ class MembershipService:
         membership.pin = None
         membership.save(update_fields=["pin"])
 
+    PIN_MAX_ATTEMPTS = 5
+    PIN_LOCKOUT_MINUTES = 15
+
     @staticmethod
-    def verify_pin(membership: Membership, raw_pin: str) -> bool:
-        """Retourne True si le PIN fourni correspond au hash stocké."""
+    def verify_pin(membership: Membership, raw_pin: str) -> tuple[bool, bool]:
+        """
+        Retourne (correct, locked).
+        Increments failed counter on wrong PIN; locks after PIN_MAX_ATTEMPTS failures.
+        Resets counter on success.
+        """
+        now = timezone.now()
+        if membership.pin_locked_until and now < membership.pin_locked_until:
+            return False, True
+
         if not membership.pin:
-            return False
-        return check_password(raw_pin, membership.pin)
+            return False, False
+
+        ok = check_password(raw_pin, membership.pin)
+        if ok:
+            membership.pin_failed_attempts = 0
+            membership.pin_locked_until = None
+            membership.save(update_fields=["pin_failed_attempts", "pin_locked_until"])
+            return True, False
+
+        membership.pin_failed_attempts += 1
+        if membership.pin_failed_attempts >= MembershipService.PIN_MAX_ATTEMPTS:
+            membership.pin_locked_until = now + timedelta(minutes=MembershipService.PIN_LOCKOUT_MINUTES)
+        membership.save(update_fields=["pin_failed_attempts", "pin_locked_until"])
+        return False, False
 
     @staticmethod
     def check_pin_required(membership: Membership, model_class) -> bool:

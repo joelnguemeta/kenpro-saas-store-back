@@ -267,6 +267,8 @@ class Membership(models.Model):
     # NULL = pas de PIN configuré sur ce membership.
     # Demandé à chaque action sur un PinScope du tenant.
     pin = models.CharField(max_length=128, null=True, blank=True)
+    pin_failed_attempts = models.PositiveSmallIntegerField(default=0)
+    pin_locked_until = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         verbose_name = "Appartenance"

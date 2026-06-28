@@ -263,8 +263,12 @@ class RepairTicketViewSet(TenantScopedViewSet):
         serializer = AssignTechnicianSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
+        tenant = self._require_tenant()
         technician = get_object_or_404(
-            User, pk=serializer.validated_data["technician_id"]
+            User,
+            pk=serializer.validated_data["technician_id"],
+            memberships__tenant=tenant,
+            memberships__is_active=True,
         )
         ticket.technician = technician
         ticket.save()

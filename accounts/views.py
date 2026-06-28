@@ -2,7 +2,7 @@ from drf_spectacular.utils import OpenApiExample, OpenApiResponse, extend_schema
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.generics import CreateAPIView
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -108,15 +108,16 @@ class PasswordResetRequestView(APIView):
         serializer.is_valid(raise_exception=True)
         try:
             PasswordResetService.request_reset(serializer.validated_data["email"])
-        except ValueError as exc:
-            return ErrorResponse(error_code=ErrorCode.BAD_REQUEST, message=str(exc), status_code=400)
+        except ValueError:
+            # Don't reveal whether the email is registered.
+            pass
         except Exception:
             return ErrorResponse(
                 error_code=ErrorCode.INTERNAL_ERROR,
                 message="Impossible d'envoyer l'email. Vérifiez la configuration SMTP.",
                 status_code=500,
             )
-        return SuccessResponse(message="Un code de réinitialisation a été envoyé par email.")
+        return SuccessResponse(message="Si un compte est associé à cet email, un code a été envoyé.")
 
 
 class PasswordResetConfirmView(APIView):
@@ -184,12 +185,8 @@ class PasswordChangeView(APIView):
         serializer = PasswordChangeSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         try:
-            user = User.objects.get(phone=serializer.validated_data["phone"])
-        except User.DoesNotExist:
-            return ErrorResponse(error_code=ErrorCode.NOT_FOUND, message="Utilisateur introuvable.", status_code=404)
-        try:
             PasswordChangeService.change(
-                user=user,
+                user=request.user,
                 current_password=serializer.validated_data["current_password"],
                 new_password=serializer.validated_data["new_password"],
             )
@@ -199,7 +196,7 @@ class PasswordChangeView(APIView):
 
 
 class PinResetRequestView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     @extend_schema(
         summary="Demander la réinitialisation du PIN",
@@ -229,6 +226,9 @@ class PinResetRequestView(APIView):
             )
         except Membership.DoesNotExist:
             return ErrorResponse(error_code=ErrorCode.BAD_REQUEST, message="Membership introuvable.", status_code=400)
+
+        if membership.user != request.user and not request.user.is_staff:
+            return ErrorResponse(error_code=ErrorCode.FORBIDDEN, message="Action non autorisée.", status_code=403)
 
         try:
             PinResetService.request_reset(membership)
@@ -366,6 +366,7 @@ class _SuccessModelViewSet(viewsets.ModelViewSet):
 
 class UserViewSet(_SuccessModelViewSet):
     queryset = User.objects.all().order_by("phone")
+    permission_classes = [IsAdminUser]
 
     def get_serializer_class(self):
         if self.action == "create":
@@ -421,6 +422,7 @@ class UserViewSet(_SuccessModelViewSet):
 class TenantViewSet(_SuccessModelViewSet):
     queryset = Tenant.objects.all().order_by("name")
     serializer_class = TenantSerializer
+    permission_classes = [IsAdminUser]
 
 
 # ---------------------------------------------------------------------------
@@ -466,6 +468,7 @@ class RoleViewSet(_SuccessModelViewSet):
         "role_permissions__permission"
     ).order_by("name")
     serializer_class = RoleSerializer
+    permission_classes = [IsAdminUser]
 
 
 # ---------------------------------------------------------------------------
@@ -507,6 +510,13 @@ class MembershipViewSet(_SuccessModelViewSet):
     queryset = Membership.objects.select_related("user", "tenant", "role").order_by("created_at")
     serializer_class = MembershipSerializer
 
+    def get_permissions(self):
+        # PIN actions are available to authenticated users (own membership only).
+        # All CRUD operations require staff.
+        if self.action in ("set_pin", "clear_pin", "verify_pin"):
+            return [IsAuthenticated()]
+        return [IsAdminUser()]
+
     @extend_schema(
         summary="Définir ou changer le PIN",
         description=(
@@ -528,6 +538,8 @@ class MembershipViewSet(_SuccessModelViewSet):
     @action(detail=True, methods=["post"], url_path="set-pin")
     def set_pin(self, request, pk=None):
         membership = self.get_object()
+        if membership.user != request.user and not request.user.is_staff:
+            return ErrorResponse(error_code=ErrorCode.FORBIDDEN, message="Action non autorisée.", status_code=403)
         serializer = SetPinSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         MembershipService.set_pin(membership, serializer.validated_data["pin"])
@@ -546,6 +558,8 @@ class MembershipViewSet(_SuccessModelViewSet):
     @action(detail=True, methods=["post"], url_path="clear-pin")
     def clear_pin(self, request, pk=None):
         membership = self.get_object()
+        if membership.user != request.user and not request.user.is_staff:
+            return ErrorResponse(error_code=ErrorCode.FORBIDDEN, message="Action non autorisée.", status_code=403)
         MembershipService.clear_pin(membership)
         return SuccessResponse(message="PIN supprimé.")
 
@@ -570,9 +584,13 @@ class MembershipViewSet(_SuccessModelViewSet):
     @action(detail=True, methods=["post"], url_path="verify-pin")
     def verify_pin(self, request, pk=None):
         membership = self.get_object()
+        if membership.user != request.user and not request.user.is_staff:
+            return ErrorResponse(error_code=ErrorCode.FORBIDDEN, message="Action non autorisée.", status_code=403)
         serializer = VerifyPinSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        ok = MembershipService.verify_pin(membership, serializer.validated_data["pin"])
+        ok, locked = MembershipService.verify_pin(membership, serializer.validated_data["pin"])
+        if locked:
+            return ErrorResponse(error_code=ErrorCode.FORBIDDEN, message="Trop de tentatives. PIN verrouillé.", status_code=403)
         if ok:
             return SuccessResponse(message="PIN valide.")
         return ErrorResponse(error_code=ErrorCode.FORBIDDEN, message="PIN incorrect.", status_code=403)
@@ -627,6 +645,7 @@ class MembershipViewSet(_SuccessModelViewSet):
 class PinScopeViewSet(_SuccessModelViewSet):
     queryset = PinScope.objects.select_related("tenant", "content_type").order_by("tenant__name")
     serializer_class = PinScopeSerializer
+    permission_classes = [IsAdminUser]
 
 
 # ---------------------------------------------------------------------------
@@ -647,6 +666,7 @@ _TAG_ADMIN = "Super Admin"
 class PlanViewSet(_SuccessModelViewSet):
     queryset = Plan.objects.order_by("monthly_price")
     serializer_class = PlanSerializer
+    permission_classes = [IsAdminUser]
 
 
 # ---------------------------------------------------------------------------
@@ -660,6 +680,7 @@ class PlanViewSet(_SuccessModelViewSet):
 class SubscriptionViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = Subscription.objects.select_related("tenant", "plan").order_by("-created_at")
     serializer_class = SubscriptionSerializer
+    permission_classes = [IsAdminUser]
 
     def list(self, request, *args, **kwargs):
         qs = self.filter_queryset(self.get_queryset())
@@ -762,6 +783,7 @@ class SubscriptionViewSet(viewsets.ReadOnlyModelViewSet):
 class ServiceFlagViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = ServiceFlag.objects.select_related("tenant").order_by("tenant__name", "service")
     serializer_class = ServiceFlagSerializer
+    permission_classes = [IsAdminUser]
 
     def get_queryset(self):
         qs = super().get_queryset()

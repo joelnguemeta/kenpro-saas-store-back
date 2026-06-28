@@ -123,7 +123,6 @@ class PasswordResetConfirmSerializer(serializers.Serializer):
 
 
 class PasswordChangeSerializer(serializers.Serializer):
-    phone = serializers.CharField()
     current_password = serializers.CharField(write_only=True)
     new_password = serializers.CharField(min_length=8, write_only=True)
 
