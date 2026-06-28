@@ -7,7 +7,7 @@ Ils ne sont jamais recalculés a posteriori.
 """
 from rest_framework import serializers
 
-from .models import Payment, Sale, SaleLine
+from .models import CreditNote, CreditNoteLine, Payment, Sale, SaleLine
 
 
 class PaymentSerializer(serializers.ModelSerializer):
@@ -77,3 +77,41 @@ class ValidateSaleSerializer(serializers.Serializer):
 class CancelSaleSerializer(serializers.Serializer):
     """Payload pour l'annulation d'une vente."""
     reason = serializers.CharField(required=False, allow_blank=True, max_length=500)
+
+
+class CreditNoteLineSerializer(serializers.ModelSerializer):
+    product_name = serializers.CharField(source="sale_line.product.name", read_only=True)
+
+    class Meta:
+        model = CreditNoteLine
+        fields = [
+            "id", "sale_line", "product_name",
+            "quantity", "unit_price", "line_total",
+        ]
+        read_only_fields = fields
+
+
+class CreditNoteSerializer(serializers.ModelSerializer):
+    lines = CreditNoteLineSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = CreditNote
+        fields = [
+            "id", "sale", "reference", "reason", "note",
+            "total", "lines", "created_by", "created_at",
+        ]
+        read_only_fields = fields
+
+
+class ReturnLineInputSerializer(serializers.Serializer):
+    sale_line = serializers.UUIDField()
+    quantity = serializers.DecimalField(max_digits=14, decimal_places=3, min_value="0.001")
+
+
+class CreateCreditNoteSerializer(serializers.Serializer):
+    lines = ReturnLineInputSerializer(many=True, min_length=1)
+    reason = serializers.ChoiceField(
+        choices=CreditNote.Reason.choices,
+        default=CreditNote.Reason.OTHER,
+    )
+    note = serializers.CharField(max_length=500, required=False, allow_blank=True, default="")

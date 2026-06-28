@@ -11,7 +11,7 @@ class CustomerSerializer(serializers.ModelSerializer):
         model = Customer
         fields = [
             "id", "name", "phone", "email",
-            "type", "niu", "trust_level",
+            "type", "niu", "trust_level", "pricing_tier",
             "is_express", "notes", "debt_balance",
             "created_at", "updated_at",
         ]
@@ -25,7 +25,7 @@ class CustomerListSerializer(serializers.ModelSerializer):
         model = Customer
         fields = [
             "id", "name", "phone", "email",
-            "type", "trust_level", "is_express",
+            "type", "trust_level", "pricing_tier", "is_express",
             "debt_balance", "created_at",
         ]
         read_only_fields = fields

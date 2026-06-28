@@ -25,6 +25,7 @@ ALLOWED_HOSTS = [h for h in os.environ.get("DJANGO_ALLOWED_HOSTS", "").split(","
 # Application definition
 
 INSTALLED_APPS = [
+    'modeltranslation',
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -34,6 +35,7 @@ INSTALLED_APPS = [
     # Tiers
     'rest_framework',
     'drf_spectacular',
+    'django_celery_beat',
     # Apps KENPRO
     'accounts',
     'inventory',
@@ -41,6 +43,8 @@ INSTALLED_APPS = [
     'supplier',
     'sales',
     'repair',
+    'mobilemoney',
+    'notifications',
 ]
 
 AUTH_USER_MODEL = "accounts.User"
@@ -48,6 +52,7 @@ AUTH_USER_MODEL = "accounts.User"
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
+    'django.middleware.locale.LocaleMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
@@ -78,6 +83,25 @@ TENANT_EXEMPT_PATHS = [
 ]
 
 PASSWORD_RESET_TOKEN_TTL_MINUTES = 15
+
+# URL publique du frontend — utilisée pour générer les liens partageables
+# (reçu WhatsApp, catalogue en ligne).
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "https://app.kenpro.cm")
+
+# ---------------------------------------------------------------------------
+# Celery
+# ---------------------------------------------------------------------------
+CELERY_BROKER_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+CELERY_RESULT_BACKEND = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+CELERY_TIMEZONE = "Africa/Douala"
+CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
+
+# ---------------------------------------------------------------------------
+# WhatsApp Business API (optionnel — si non configuré, alertes désactivées)
+# ---------------------------------------------------------------------------
+WHATSAPP_API_URL = os.environ.get("WHATSAPP_API_URL", "")
+WHATSAPP_API_TOKEN = os.environ.get("WHATSAPP_API_TOKEN", "")
+WHATSAPP_FROM_PHONE_ID = os.environ.get("WHATSAPP_FROM_PHONE_ID", "")
 
 # Durée de validité des jetons de réinitialisation PIN (en minutes)
 PIN_RESET_TOKEN_TTL_MINUTES = 15
@@ -136,9 +160,16 @@ AUTH_PASSWORD_VALIDATORS = [
 # Internationalization
 # https://docs.djangoproject.com/en/6.0/topics/i18n/
 
-LANGUAGE_CODE = 'en-us'
+LANGUAGE_CODE = 'fr'
 
-TIME_ZONE = 'UTC'
+LANGUAGES = [
+    ('fr', 'Français'),
+    ('en', 'English'),
+]
+
+LOCALE_PATHS = [BASE_DIR / 'locale']
+
+TIME_ZONE = 'Africa/Douala'
 
 USE_I18N = True
 

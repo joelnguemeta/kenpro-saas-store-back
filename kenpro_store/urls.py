@@ -18,14 +18,20 @@ from django.contrib import admin
 from django.urls import include, path
 from drf_spectacular.views import SpectacularAPIView, SpectacularRedocView, SpectacularSwaggerView
 
+from .views import DashboardView, FiscalReportView
+
 urlpatterns = [
     path("admin/", admin.site.urls),
+    path("api/v1/dashboard/", DashboardView.as_view(), name="dashboard"),
+    path("api/v1/fiscal/report/", FiscalReportView.as_view(), name="fiscal-report"),
     path("api/v1/accounts/", include("accounts.urls")),
     path("api/v1/inventory/", include("inventory.urls")),
     path("api/v1/crm/", include("crm.urls")),
     path("api/v1/sales/", include("sales.urls")),
     path("api/v1/supplier/", include("supplier.urls")),
     path("api/v1/repair/", include("repair.urls")),
+    path("api/v1/mobilemoney/", include("mobilemoney.urls")),
+    path("api/v1/notifications/", include("notifications.urls")),
     # Schéma OpenAPI brut (JSON/YAML)
     path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
     # Swagger UI

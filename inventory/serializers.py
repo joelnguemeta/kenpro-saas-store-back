@@ -40,7 +40,7 @@ class TenantScopedSerializer(serializers.ModelSerializer):
 class CategorySerializer(TenantScopedSerializer):
     class Meta:
         model = Category
-        fields = ["id", "name", "parent", "created_at", "updated_at"]
+        fields = ["id", "name", "name_fr", "name_en", "parent", "created_at", "updated_at"]
         read_only_fields = ["id", "created_at", "updated_at"]
 
     def validate_parent(self, value):
@@ -51,8 +51,10 @@ class ProductSerializer(TenantScopedSerializer):
     class Meta:
         model = Product
         fields = [
-            "id", "sku", "name", "category", "base_unit",
-            "floor_price", "cost", "status", "is_published_online",
+            "id", "sku", "name", "name_fr", "name_en", "category", "base_unit",
+            "cost", "floor_price", "retail_price",
+            "reseller_price", "wholesale_price", "public_price",
+            "status", "is_published_online",
             "created_at", "updated_at",
         ]
         # sku auto-généré par tenant (cf. Product.save).
@@ -80,7 +82,7 @@ class ProductVariantSerializer(TenantScopedSerializer):
     class Meta:
         model = ProductVariant
         fields = [
-            "id", "product", "name", "attributes", "sku",
+            "id", "product", "name", "name_fr", "name_en", "attributes", "sku",
             "floor_price", "effective_floor_price",
             "created_at", "updated_at",
         ]
@@ -108,7 +110,7 @@ class MediaAssetSerializer(TenantScopedSerializer):
 class LocationSerializer(TenantScopedSerializer):
     class Meta:
         model = Location
-        fields = ["id", "name", "type", "is_default", "created_at", "updated_at"]
+        fields = ["id", "name", "name_fr", "name_en", "type", "is_default", "created_at", "updated_at"]
         read_only_fields = ["id", "created_at", "updated_at"]
 
 
@@ -130,6 +132,29 @@ class StockLevelSerializer(serializers.ModelSerializer):
         fields = ["id", "product", "variant", "location", "quantity",
                   "reorder_threshold", "updated_at"]
         read_only_fields = fields
+
+
+class StockAlertSerializer(serializers.ModelSerializer):
+    """Niveau de stock en alerte (quantity ≤ reorder_threshold)."""
+    product_name = serializers.CharField(source="product.name", read_only=True)
+    product_sku = serializers.CharField(source="product.sku", read_only=True)
+    location_name = serializers.CharField(source="location.name", read_only=True)
+    alert_level = serializers.SerializerMethodField()
+
+    class Meta:
+        model = StockLevel
+        fields = [
+            "id", "product", "product_sku", "product_name",
+            "variant", "location", "location_name",
+            "quantity", "reorder_threshold", "alert_level",
+            "updated_at",
+        ]
+        read_only_fields = fields
+
+    def get_alert_level(self, obj) -> str:
+        if obj.quantity <= 0:
+            return "critical"
+        return "low"
 
 
 class StockMovementSerializer(TenantScopedSerializer):
@@ -164,8 +189,11 @@ class ProductContentSerializer(TenantScopedSerializer):
     class Meta:
         model = ProductContent
         fields = [
-            "id", "product", "long_description", "seo_title",
-            "seo_description", "online_status", "created_at", "updated_at",
+            "id", "product",
+            "long_description", "long_description_fr", "long_description_en",
+            "seo_title", "seo_title_fr", "seo_title_en",
+            "seo_description", "seo_description_fr", "seo_description_en",
+            "online_status", "created_at", "updated_at",
         ]
         read_only_fields = ["id", "created_at", "updated_at"]
 

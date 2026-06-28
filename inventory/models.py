@@ -58,6 +58,14 @@ class Product(TenantOwnedModel):
     floor_price = models.DecimalField(max_digits=14, decimal_places=2)
     # Coût d'achat / PMP — sert au calcul de la marge.
     cost = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    # Prix de vente grand public (détail).
+    retail_price = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    # Prix accordé aux petits revendeurs informels.
+    reseller_price = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    # Prix accordé aux grossistes (volumes importants).
+    wholesale_price = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    # Prix déclaré aux autorités fiscales (DGI, douane…).
+    public_price = models.DecimalField(max_digits=14, decimal_places=2, default=0)
     status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=DRAFT)
     is_published_online = models.BooleanField(default=False)
 
@@ -275,11 +283,13 @@ class StockMovement(TenantOwnedModel, AuthoredModel):
     OUT = "out"
     TRANSFER = "transfer"
     ADJUSTMENT = "adjustment"
+    LOSS = "loss"
     TYPE_CHOICES = [
         (IN, "Entrée"),
         (OUT, "Sortie"),
         (TRANSFER, "Transfert"),
         (ADJUSTMENT, "Ajustement"),
+        (LOSS, "Perte / casse"),
     ]
 
     product = models.ForeignKey(Product, on_delete=models.PROTECT, related_name="movements")
@@ -321,7 +331,9 @@ class StockMovement(TenantOwnedModel, AuthoredModel):
         """
         if self.type == self.OUT:
             return -abs(self.quantity)
-        if self.type == self.IN:
+        if self.type in (self.IN,):
             return abs(self.quantity)
+        if self.type == self.LOSS:
+            return -abs(self.quantity)
         # transfer / adjustment : la valeur signée est portée telle quelle.
         return self.quantity

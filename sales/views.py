@@ -22,15 +22,19 @@ from kenpro_store.viewsets import TenantScopedViewSet
 
 from crm.services import DebtService
 
-from .models import Payment, Sale, SaleLine
+from .models import CreditNote, Payment, Sale, SaleLine
+from .whatsapp import receipt_whatsapp_link
 from .serializers import (
     CancelSaleSerializer,
+    CreateCreditNoteSerializer,
+    CreditNoteSerializer,
     PaymentSerializer,
     SaleLineSerializer,
     SaleListSerializer,
     SaleSerializer,
     ValidateSaleSerializer,
 )
+from .services import CreditNoteService, ReturnLine
 
 _TAG = "Ventes"
 
@@ -133,6 +137,63 @@ class SaleViewSet(TenantScopedViewSet):
         request=CancelSaleSerializer,
         tags=[_TAG],
     )
+    @extend_schema(
+        summary="Lien WhatsApp pour partager le reçu",
+        description=(
+            "Génère un lien wa.me avec le reçu pré-formaté. "
+            "Passer `?phone=+237600000001` pour cibler directement un contact."
+        ),
+        tags=[_TAG],
+    )
+    @extend_schema(
+        summary="Émettre un avoir sur une vente validée",
+        description=(
+            "Crée un avoir (partiel ou total) sur une vente validée. "
+            "Réintègre le stock et réduit la dette client si applicable."
+        ),
+        request=CreateCreditNoteSerializer,
+        tags=[_TAG],
+    )
+    @action(detail=True, methods=["post"], url_path="credit-note")
+    def issue_credit_note(self, request, pk=None):
+        sale = self.get_object()
+        s = CreateCreditNoteSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        d = s.validated_data
+        try:
+            credit_note = CreditNoteService.create(
+                sale=sale,
+                lines=[
+                    ReturnLine(
+                        sale_line_id=str(l["sale_line"]),
+                        quantity=l["quantity"],
+                    )
+                    for l in d["lines"]
+                ],
+                reason=d["reason"],
+                note=d["note"],
+                created_by=request.user,
+            )
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
+        return SuccessResponse(
+            data=CreditNoteSerializer(credit_note).data,
+            message="Avoir émis avec succès.",
+            status_code=status.HTTP_201_CREATED,
+        )
+
+    @action(detail=True, methods=["get"], url_path="whatsapp-receipt")
+    def whatsapp_receipt(self, request, pk=None):
+        sale = self.get_object()
+        if sale.status != Sale.Status.VALIDATED:
+            return ErrorResponse(
+                error_code=ErrorCode.BAD_REQUEST,
+                message="Le reçu WhatsApp n'est disponible que pour les ventes validées.",
+            )
+        phone = request.query_params.get("phone")
+        data = receipt_whatsapp_link(sale, phone)
+        return SuccessResponse(data=data)
+
     @action(detail=True, methods=["post"], url_path="cancel")
     def cancel_sale(self, request, pk=None):
         sale = self.get_object()
@@ -278,5 +339,31 @@ class PaymentViewSet(TenantScopedViewSet):
         )
 
     def destroy(self, request, *args, **kwargs):
-        self.perform_destroy(self.get_object())
+        payment = self.get_object()
+        # Annule la dette si le paiement supprimé était de type CREDIT.
+        if payment.method == Payment.Method.CREDIT and payment.sale.customer_id:
+            DebtService.repay(
+                payment.sale.customer,
+                payment.amount,
+                reference=str(payment.sale_id),
+                note="Annulation paiement crédit supprimé",
+                recorded_by=request.user,
+            )
+        self.perform_destroy(payment)
         return SuccessResponse(message=SuccessMessage.DELETED, status_code=status.HTTP_204_NO_CONTENT)
+
+
+@extend_schema_view(
+    list=extend_schema(summary="Lister les avoirs", tags=[_TAG]),
+    retrieve=extend_schema(summary="Détail d'un avoir", tags=[_TAG]),
+)
+class CreditNoteViewSet(TenantScopedViewSet):
+    queryset = CreditNote.objects.prefetch_related("lines__sale_line__product")
+    serializer_class = CreditNoteSerializer
+    http_method_names = ["get", "head", "options"]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        if sale_id := self.request.query_params.get("sale"):
+            qs = qs.filter(sale=sale_id)
+        return qs.order_by("-created_at")

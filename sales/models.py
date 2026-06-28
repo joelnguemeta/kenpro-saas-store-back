@@ -13,7 +13,7 @@ from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils import timezone
 
-from kenpro_store.db import TenantOwnedModel
+from kenpro_store.db import AuthoredModel, TenantOwnedModel
 
 User = settings.AUTH_USER_MODEL
 
@@ -255,3 +255,106 @@ class Payment(TenantOwnedModel):
             f"{self.get_method_display()} {self.amount} "
             f"({self.get_status_display()}) — vente {self.sale_id}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Avoir (note de crédit) — F-12
+# ---------------------------------------------------------------------------
+
+class CreditNote(TenantOwnedModel, AuthoredModel):
+    """
+    Avoir émis sur une vente validée.
+
+    Un avoir peut être partiel (retour de certains articles seulement).
+    Il est immuable après création (append-only) : on n'annule pas un avoir,
+    on en émet un nouveau si nécessaire.
+
+    Effets à la création (gérés par CreditNoteService) :
+      - Entrée de stock pour chaque ligne retournée
+      - Annulation de la dette client si la vente originale était à crédit
+    """
+
+    class Reason(models.TextChoices):
+        CUSTOMER_REQUEST = "customer_request", "Demande client"
+        DEFECTIVE = "defective", "Produit défectueux"
+        WRONG_ITEM = "wrong_item", "Mauvais article"
+        PRICE_ERROR = "price_error", "Erreur de prix"
+        OTHER = "other", "Autre"
+
+    sale = models.ForeignKey(
+        Sale,
+        on_delete=models.PROTECT,
+        related_name="credit_notes",
+        verbose_name="Vente d'origine",
+    )
+    reference = models.CharField(max_length=32, blank=True, verbose_name="Référence avoir")
+    reason = models.CharField(
+        max_length=30,
+        choices=Reason.choices,
+        default=Reason.OTHER,
+        verbose_name="Motif",
+    )
+    note = models.CharField(max_length=500, blank=True, verbose_name="Note")
+    # Montant total de l'avoir (somme des lignes retournées)
+    total = models.DecimalField(
+        max_digits=14, decimal_places=2, default=0, verbose_name="Total avoir"
+    )
+
+    class Meta:
+        verbose_name = "Avoir"
+        verbose_name_plural = "Avoirs"
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(fields=["tenant", "reference"], name="unique_credit_note_ref_per_tenant"),
+        ]
+
+    def __str__(self) -> str:
+        ref = self.reference or str(self.id)[:8].upper()
+        return f"Avoir {ref} — vente {self.sale.reference or str(self.sale_id)[:8].upper()}"
+
+
+class CreditNoteLine(TenantOwnedModel):
+    """
+    Ligne d'un avoir : un produit retourné avec sa quantité et son prix.
+    Le prix est repris du snapshot de la SaleLine d'origine.
+    """
+    credit_note = models.ForeignKey(
+        CreditNote,
+        on_delete=models.CASCADE,
+        related_name="lines",
+        verbose_name="Avoir",
+    )
+    sale_line = models.ForeignKey(
+        SaleLine,
+        on_delete=models.PROTECT,
+        related_name="credit_note_lines",
+        verbose_name="Ligne de vente d'origine",
+    )
+    quantity = models.DecimalField(
+        max_digits=14, decimal_places=3, verbose_name="Quantité retournée"
+    )
+    # Prix unitaire repris de la SaleLine (snapshot)
+    unit_price = models.DecimalField(
+        max_digits=14, decimal_places=2, verbose_name="Prix unitaire"
+    )
+    # Montant = quantity × unit_price
+    line_total = models.DecimalField(
+        max_digits=14, decimal_places=2, verbose_name="Total ligne"
+    )
+
+    class Meta:
+        verbose_name = "Ligne d'avoir"
+        verbose_name_plural = "Lignes d'avoir"
+
+    def save(self, *args, **kwargs):
+        if self.quantity <= 0:
+            raise ValidationError("La quantité retournée doit être positive.")
+        if self.sale_line.sale_id != self.credit_note.sale_id:
+            raise ValidationError("La ligne ne correspond pas à la vente de l'avoir.")
+        if self.quantity > self.sale_line.quantity:
+            raise ValidationError(
+                f"Quantité retournée ({self.quantity}) supérieure "
+                f"à la quantité vendue ({self.sale_line.quantity})."
+            )
+        self.line_total = self.quantity * self.unit_price
+        super().save(*args, **kwargs)

@@ -1,6 +1,9 @@
+from django.urls import path
 from rest_framework.routers import DefaultRouter
 
 from .views import (
+    CatalogShareView,
+    StockAlertView,
     CategoryViewSet,
     LocationViewSet,
     MediaAssetViewSet,
@@ -25,4 +28,7 @@ router.register("unit-conversions", UnitConversionViewSet, basename="unitconvers
 router.register("stock-levels", StockLevelViewSet, basename="stocklevel")
 router.register("stock-movements", StockMovementViewSet, basename="stockmovement")
 
-urlpatterns = router.urls
+urlpatterns = router.urls + [
+    path("catalog-share/", CatalogShareView.as_view(), name="catalog-share"),
+    path("stock-alerts/", StockAlertView.as_view(), name="stock-alerts"),
+]

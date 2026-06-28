@@ -1,11 +1,18 @@
 """
 Viewsets du catalogue `inventory`. Tous tenant-scopés (TenantScopedViewSet).
 """
-from drf_spectacular.utils import extend_schema, extend_schema_view
+from drf_spectacular.utils import OpenApiParameter, extend_schema, extend_schema_view
 from rest_framework import filters
-from rest_framework.exceptions import ValidationError
+from rest_framework.decorators import action
+from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.views import APIView
 
+from django.db import models
+from django.db.models import Q
+from kenpro_store.responses import SuccessResponse
 from kenpro_store.viewsets import TenantScopedReadOnlyViewSet, TenantScopedViewSet
+from sales.whatsapp import catalog_share_link
 
 from .models import (
     Category,
@@ -79,6 +86,62 @@ class ProductViewSet(TenantScopedViewSet):
             if field in params:
                 qs = qs.filter(**{field: params[field]})
         return qs
+
+    @extend_schema(
+        summary="Prix suggéré selon le segment tarifaire du client",
+        description=(
+            "Retourne le prix conseillé pour ce produit en fonction du `pricing_tier` "
+            "du client (retail → retail_price, reseller → reseller_price, "
+            "wholesale → wholesale_price). "
+            "Passer `?customer=<uuid>` pour cibler un client précis, "
+            "ou `?tier=retail|reseller|wholesale` directement."
+        ),
+        parameters=[
+            OpenApiParameter(name="customer", description="UUID du client", required=False, type=str),
+            OpenApiParameter(name="tier", description="retail | reseller | wholesale", required=False, type=str),
+        ],
+        tags=["Catalogue"],
+    )
+    @action(detail=True, methods=["get"], url_path="suggested-price")
+    def suggested_price(self, request, pk=None):
+        from crm.models import Customer
+
+        product = self.get_object()
+        tenant = self._require_tenant()
+
+        tier = request.query_params.get("tier")
+
+        if not tier:
+            customer_id = request.query_params.get("customer")
+            if customer_id:
+                try:
+                    customer = Customer.objects.get(id=customer_id, tenant=tenant)
+                    tier = customer.pricing_tier
+                except Customer.DoesNotExist:
+                    tier = Customer.PricingTier.RETAIL
+            else:
+                tier = Customer.PricingTier.RETAIL
+
+        price_map = {
+            Customer.PricingTier.RETAIL: product.retail_price,
+            Customer.PricingTier.RESELLER: product.reseller_price,
+            Customer.PricingTier.WHOLESALE: product.wholesale_price,
+        }
+        suggested = price_map.get(tier, product.retail_price)
+
+        return SuccessResponse(data={
+            "product_id": str(product.id),
+            "sku": product.sku,
+            "name": product.name,
+            "tier": tier,
+            "suggested_price": suggested,
+            "floor_price": product.floor_price,
+            "prices": {
+                "retail": product.retail_price,
+                "reseller": product.reseller_price,
+                "wholesale": product.wholesale_price,
+            },
+        })
 
 
 @extend_schema_view(
@@ -210,4 +273,82 @@ class StockMovementViewSet(TenantScopedViewSet):
             )
         except InsufficientStock as exc:
             raise ValidationError({"quantity": str(exc)})
+
+
+class StockAlertView(APIView):
+    """
+    Liste les produits en rupture ou sous le seuil de réapprovisionnement.
+    Retourne uniquement les StockLevel dont reorder_threshold > 0
+    et quantity ≤ reorder_threshold, triés par sévérité (critical en premier).
+    """
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary="Alertes de stock (rupture et seuil bas)",
+        description=(
+            "Retourne les niveaux de stock en alerte : "
+            "`critical` (quantity ≤ 0) et `low` (0 < quantity ≤ reorder_threshold). "
+            "Seuls les emplacements ayant un seuil configuré (reorder_threshold > 0) sont inclus. "
+            "Filtrer par boutique avec `?location=<uuid>`."
+        ),
+        parameters=[
+            OpenApiParameter(name="location", description="UUID de la boutique", required=False, type=str),
+        ],
+        tags=["Stock"],
+    )
+    def get(self, request):
+        from .serializers import StockAlertSerializer
+
+        tenant = getattr(request, "tenant", None)
+        if tenant is None:
+            from kenpro_store.enums import ErrorCode
+            from kenpro_store.responses import ErrorResponse
+            return ErrorResponse(error_code=ErrorCode.FORBIDDEN, message="Aucun tenant actif.")
+
+        qs = (
+            StockLevel.objects.select_related("product", "variant", "location")
+            .filter(tenant=tenant, reorder_threshold__gt=0)
+            .filter(quantity__lte=models.F("reorder_threshold"))
+        )
+
+        location_id = request.query_params.get("location")
+        if location_id:
+            qs = qs.filter(location=location_id)
+
+        # critical (rupture) avant low (seuil bas)
+        from django.db.models import Case, IntegerField, Value, When
+        qs = qs.annotate(
+            severity=Case(
+                When(quantity__lte=0, then=Value(0)),
+                default=Value(1),
+                output_field=IntegerField(),
+            )
+        ).order_by("severity", "quantity")
+
+        alerts_data = StockAlertSerializer(qs, many=True).data
+        critical = sum(1 for a in alerts_data if a["alert_level"] == "critical")
+        return SuccessResponse(data={
+            "count": len(alerts_data),
+            "critical": critical,
+            "low": len(alerts_data) - critical,
+            "alerts": alerts_data,
+        })
+
+
+class CatalogShareView(APIView):
+    """
+    Génère le lien partageable vers le catalogue en ligne du tenant (F-29).
+    Retourne aussi le lien wa.me pré-rempli pour le partage WhatsApp direct.
+    """
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary="Lien de partage du catalogue (WhatsApp)",
+        tags=["Catalogue"],
+    )
+    def get(self, request):
+        tenant = getattr(request, "tenant", None)
+        if tenant is None:
+            raise PermissionDenied("Aucun tenant actif sur la requête.")
+        return SuccessResponse(data=catalog_share_link(tenant))
         serializer.instance = movement

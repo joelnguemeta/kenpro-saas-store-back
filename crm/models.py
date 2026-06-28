@@ -32,6 +32,11 @@ class Customer(TenantOwnedModel):
         RELIABLE = "reliable", "Fiable"
         AT_RISK = "at_risk", "À risque"
 
+    class PricingTier(models.TextChoices):
+        RETAIL = "retail", "Détail (grand public)"
+        RESELLER = "reseller", "Petit revendeur"
+        WHOLESALE = "wholesale", "Grossiste"
+
     # --- Champs ----------------------------------------------------------
 
     # Nom complet (particulier) ou raison sociale (entreprise)
@@ -53,6 +58,14 @@ class Customer(TenantOwnedModel):
         choices=Type.choices,
         default=Type.INDIVIDUAL,
         verbose_name="Type de client",
+    )
+
+    # Segment tarifaire — détermine le prix par défaut proposé lors d'une vente.
+    pricing_tier = models.CharField(
+        max_length=20,
+        choices=PricingTier.choices,
+        default=PricingTier.RETAIL,
+        verbose_name="Segment tarifaire",
     )
 
     # Numéro d'Identifiant Unique fiscal (B2B uniquement)
