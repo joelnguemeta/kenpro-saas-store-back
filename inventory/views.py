@@ -492,3 +492,63 @@ class CatalogShareView(APIView):
             raise PermissionDenied("Aucun tenant actif sur la requête.")
         return SuccessResponse(data=catalog_share_link(tenant))
         serializer.instance = movement
+
+
+class StockTransferView(APIView):
+    """
+    Transfert de stock entre deux emplacements du tenant.
+    Crée une sortie (source) + une entrée (destination) atomiques,
+    liées par une référence commune TR-XXXX. Survente refusée.
+    """
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary="Transférer du stock entre deux boutiques/emplacements",
+        request=None,
+        tags=[_STOCK_TAG],
+    )
+    def post(self, request):
+        from kenpro_store.enums import ErrorCode
+        from kenpro_store.responses import ErrorResponse
+
+        tenant = getattr(request, "tenant", None)
+        if tenant is None:
+            return ErrorResponse(error_code=ErrorCode.FORBIDDEN, message="Aucun tenant actif.")
+
+        data = request.data
+        try:
+            product = Product.objects.get(id=data.get("product"), tenant=tenant)
+            from_location = Location.objects.get(id=data.get("from_location"), tenant=tenant)
+            to_location = Location.objects.get(id=data.get("to_location"), tenant=tenant)
+        except (Product.DoesNotExist, Location.DoesNotExist, ValueError, TypeError):
+            return ErrorResponse(
+                error_code=ErrorCode.BAD_REQUEST,
+                message="Produit ou emplacement introuvable pour cette boutique.",
+            )
+
+        try:
+            out_mv, in_mv = StockLedger.transfer(
+                tenant=tenant,
+                product=product,
+                from_location=from_location,
+                to_location=to_location,
+                quantity=data.get("quantity"),
+                unit=data.get("unit") or product.base_unit,
+                reason=data.get("reason", ""),
+                created_by=request.user if request.user.is_authenticated else None,
+            )
+        except InsufficientStock as exc:
+            return ErrorResponse(error_code=ErrorCode.BAD_REQUEST, message=str(exc))
+        except (ValueError, Exception) as exc:
+            if isinstance(exc, ValueError):
+                return ErrorResponse(error_code=ErrorCode.BAD_REQUEST, message=str(exc))
+            raise
+
+        return SuccessResponse(
+            data={
+                "reference": out_mv.reference,
+                "out": StockMovementSerializer(out_mv).data,
+                "in": StockMovementSerializer(in_mv).data,
+            },
+            message=f"{data.get('quantity')} transféré(s) de {from_location.name} vers {to_location.name}.",
+        )

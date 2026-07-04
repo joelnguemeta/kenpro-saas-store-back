@@ -91,3 +91,59 @@ class StockLedger:
             tenant=tenant, product=product, location=location, variant=variant
         )
         return movement
+
+    @classmethod
+    @transaction.atomic
+    def transfer(
+        cls,
+        *,
+        tenant,
+        product,
+        from_location,
+        to_location,
+        quantity,
+        variant=None,
+        unit: str = "unité",
+        reason: str = "",
+        created_by=None,
+    ) -> tuple[StockMovement, StockMovement]:
+        """
+        Transfert entre deux emplacements : une sortie à la source (survente
+        refusée) + une entrée à destination, liées par une référence commune.
+        Atomique : tout ou rien.
+        """
+        import uuid as _uuid
+
+        if from_location == to_location:
+            raise ValueError("La source et la destination doivent différer.")
+        if quantity is None or Decimal(str(quantity)) <= 0:
+            raise ValueError("La quantité doit être positive.")
+
+        transfer_ref = f"TR-{_uuid.uuid4().hex[:10].upper()}"
+        label = reason or f"Transfert {from_location.name} → {to_location.name}"
+
+        out_mv = cls.record_movement(
+            tenant=tenant,
+            product=product,
+            variant=variant,
+            location=from_location,
+            type=StockMovement.OUT,
+            quantity=quantity,
+            unit=unit,
+            reason=label,
+            reference=transfer_ref,
+            created_by=created_by,
+        )
+        in_mv = cls.record_movement(
+            tenant=tenant,
+            product=product,
+            variant=variant,
+            location=to_location,
+            type=StockMovement.IN,
+            quantity=quantity,
+            unit=unit,
+            reason=label,
+            reference=transfer_ref,
+            created_by=created_by,
+        )
+        return out_mv, in_mv
