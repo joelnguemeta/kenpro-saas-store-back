@@ -204,6 +204,16 @@ class Location(TenantOwnedModel):
     type = models.CharField(max_length=16, choices=TYPE_CHOICES, default=SHOP)
     is_default = models.BooleanField(default=False)
 
+    # --- Surcharges de la config tenant (vide = hérite de TenantSettings) ---
+    # Cf. kenpro_store.branding.effective_settings : les reçus, emails et
+    # messages WhatsApp de cette boutique utilisent ces valeurs si présentes.
+    contact_phone = models.CharField(max_length=32, blank=True)
+    whatsapp_number = models.CharField(max_length=32, blank=True)
+    contact_email = models.EmailField(blank=True)
+    address = models.CharField(max_length=255, blank=True)
+    receipt_footer = models.CharField(max_length=255, blank=True)
+    email_signature = models.TextField(blank=True)
+
     class Meta:
         verbose_name = "Emplacement"
         verbose_name_plural = "Emplacements"

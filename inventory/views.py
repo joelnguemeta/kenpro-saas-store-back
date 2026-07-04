@@ -80,12 +80,71 @@ class ProductViewSet(TenantScopedViewSet):
     ordering_fields = ["sku", "name", "floor_price", "created_at"]
 
     def get_queryset(self):
+        from django.db.models import OuterRef, Subquery, IntegerField, Sum
         qs = super().get_queryset()
         params = self.request.query_params
         for field in ("status", "category", "is_published_online"):
             if field in params:
                 qs = qs.filter(**{field: params[field]})
+
+        # Annote stock_total (toutes boutiques)
+        stock_agg = (
+            StockLevel.objects.filter(product=OuterRef("pk"), tenant=OuterRef("tenant"))
+            .values("product")
+            .annotate(total=Sum("quantity"))
+            .values("total")
+        )
+        qs = qs.annotate(stock_total=Subquery(stock_agg, output_field=IntegerField()))
+
+        # Annote stock_at_location quand ?location= fourni
+        location_id = params.get("location")
+        if location_id:
+            loc_stock = (
+                StockLevel.objects.filter(
+                    product=OuterRef("pk"),
+                    tenant=OuterRef("tenant"),
+                    location_id=location_id,
+                )
+                .values("quantity")[:1]
+            )
+            qs = qs.annotate(stock_at_location=Subquery(loc_stock, output_field=IntegerField()))
+
         return qs
+
+    @extend_schema(
+        summary="Trouver un produit par code-barres (scan)",
+        description=(
+            "Recherche exacte : d'abord dans les codes-barres du tenant, "
+            "puis en repli sur le SKU. Utilisé par la douchette et le scan caméra. "
+            "Passer `?location=<uuid>` pour obtenir aussi `stock_at_location`."
+        ),
+        parameters=[
+            OpenApiParameter(name="code", description="Code-barres ou SKU scanné", required=True, type=str),
+            OpenApiParameter(name="location", description="UUID de la boutique", required=False, type=str),
+        ],
+        tags=[_TAG],
+    )
+    @action(detail=False, methods=["get"], url_path="scan")
+    def scan(self, request):
+        from kenpro_store.enums import ErrorCode
+        from kenpro_store.responses import ErrorResponse
+
+        code = (request.query_params.get("code") or "").strip()
+        if not code:
+            return ErrorResponse(
+                error_code=ErrorCode.BAD_REQUEST,
+                message="Paramètre `code` requis.",
+            )
+
+        qs = self.get_queryset()
+        product = qs.filter(barcodes__code=code).first() or qs.filter(sku=code).first()
+        if product is None:
+            return ErrorResponse(
+                error_code=ErrorCode.NOT_FOUND,
+                message=f"Aucun produit ne correspond au code « {code} ».",
+                status_code=404,
+            )
+        return SuccessResponse(data=self.get_serializer(product).data)
 
     @extend_schema(
         summary="Prix suggéré selon le segment tarifaire du client",
@@ -240,6 +299,17 @@ class StockLevelViewSet(TenantScopedReadOnlyViewSet):
     )
     serializer_class = StockLevelSerializer
 
+    def get_queryset(self):
+        qs = super().get_queryset()
+        # Filtres : ?location=<uuid> et ?product=<uuid>
+        location = self.request.query_params.get("location")
+        if location:
+            qs = qs.filter(location_id=location)
+        product = self.request.query_params.get("product")
+        if product:
+            qs = qs.filter(product_id=product)
+        return qs
+
 
 @extend_schema_view(
     list=extend_schema(summary="Lister les mouvements de stock", tags=[_STOCK_TAG]),
@@ -333,6 +403,76 @@ class StockAlertView(APIView):
             "low": len(alerts_data) - critical,
             "alerts": alerts_data,
         })
+
+
+class BarcodeLookupView(APIView):
+    """
+    Extraction d'infos produit à partir d'un code-barres scanné (création).
+
+    1. Le code correspond à un produit du tenant → on le retourne
+       (`source: "catalog"`) pour éviter les doublons.
+    2. Sinon, interrogation d'Open Food Facts (base publique mondiale de
+       codes-barres) → nom et marque pour pré-remplir le formulaire
+       (`source: "external"`).
+    3. Rien trouvé → `source: "none"` : l'utilisateur saisit les infos,
+       le code sera attaché au produit créé.
+    """
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary="Extraire les infos d'un code-barres (catalogue puis base publique)",
+        parameters=[
+            OpenApiParameter(name="code", description="Code-barres scanné", required=True, type=str),
+        ],
+        tags=[_TAG],
+    )
+    def get(self, request):
+        from kenpro_store.enums import ErrorCode
+        from kenpro_store.responses import ErrorResponse
+
+        code = (request.query_params.get("code") or "").strip()
+        if not code:
+            return ErrorResponse(error_code=ErrorCode.BAD_REQUEST, message="Paramètre `code` requis.")
+
+        tenant = getattr(request, "tenant", None)
+
+        # 1) Déjà au catalogue de la boutique ?
+        if tenant is not None:
+            product = Product.objects.filter(tenant=tenant, barcodes__code=code).first()
+            if product is not None:
+                return SuccessResponse(data={
+                    "source": "catalog",
+                    "code": code,
+                    "product": ProductSerializer(product, context={"request": request}).data,
+                })
+
+        # 2) Base publique (Open Food Facts) — best-effort, timeout court
+        external = None
+        try:
+            import json
+            from urllib.request import Request, urlopen
+
+            req = Request(
+                f"https://world.openfoodfacts.org/api/v2/product/{code}.json"
+                "?fields=product_name,brands,quantity",
+                headers={"User-Agent": "KenproStore/1.0 (contact@kenpro.cm)"},
+            )
+            with urlopen(req, timeout=4) as resp:
+                payload = json.loads(resp.read())
+            if payload.get("status") == 1:
+                p = payload.get("product", {})
+                name_parts = [p.get("brands", ""), p.get("product_name", ""), p.get("quantity", "")]
+                external = {
+                    "name": " ".join(s for s in name_parts if s).strip(),
+                    "brand": p.get("brands", ""),
+                }
+        except Exception:
+            external = None  # hors-ligne ou code inconnu — pas bloquant
+
+        if external and external["name"]:
+            return SuccessResponse(data={"source": "external", "code": code, "suggestion": external})
+
+        return SuccessResponse(data={"source": "none", "code": code})
 
 
 class CatalogShareView(APIView):

@@ -2,6 +2,7 @@ from django.urls import path
 from rest_framework.routers import DefaultRouter
 
 from .views import (
+    BarcodeLookupView,
     CatalogShareView,
     StockAlertView,
     CategoryViewSet,
@@ -30,5 +31,6 @@ router.register("stock-movements", StockMovementViewSet, basename="stockmovement
 
 urlpatterns = router.urls + [
     path("catalog-share/", CatalogShareView.as_view(), name="catalog-share"),
+    path("barcode-lookup/", BarcodeLookupView.as_view(), name="barcode-lookup"),
     path("stock-alerts/", StockAlertView.as_view(), name="stock-alerts"),
 ]

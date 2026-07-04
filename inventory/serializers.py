@@ -48,20 +48,91 @@ class CategorySerializer(TenantScopedSerializer):
 
 
 class ProductSerializer(TenantScopedSerializer):
+    # Champs lisibles aliasés pour le frontend
+    price_retail = serializers.DecimalField(source="retail_price", max_digits=14, decimal_places=2, read_only=True)
+    price_floor = serializers.DecimalField(source="floor_price", max_digits=14, decimal_places=2, read_only=True)
+    price_reseller = serializers.DecimalField(source="reseller_price", max_digits=14, decimal_places=2, read_only=True)
+    price_wholesale = serializers.DecimalField(source="wholesale_price", max_digits=14, decimal_places=2, read_only=True)
+    price_public = serializers.DecimalField(source="public_price", max_digits=14, decimal_places=2, read_only=True)
+    is_active = serializers.SerializerMethodField()
+    category_name = serializers.CharField(source="category.name", read_only=True, default=None)
+    # stock_total / stock_at_location sont annotés par le ViewSet
+    stock_total = serializers.IntegerField(read_only=True, default=0)
+    stock_at_location = serializers.IntegerField(read_only=True, default=None)
+    thumbnail = serializers.SerializerMethodField()
+    primary_barcode = serializers.SerializerMethodField()
+    # Écriture : code scanné à la création → crée le ProductBarcode principal
+    barcode = serializers.CharField(write_only=True, required=False, allow_blank=True, max_length=64)
+
+    def get_primary_barcode(self, obj):
+        primary = next((b for b in obj.barcodes.all() if b.is_primary), None)
+        if primary is None:
+            primary = next(iter(obj.barcodes.all()), None)
+        return primary.code if primary else None
+
+    def get_is_active(self, obj):
+        return obj.status == Product.ACTIVE
+
+    def get_thumbnail(self, obj):
+        media = next((m for m in obj.media.all() if m.is_primary), None)
+        if media is None and obj.media.exists():
+            media = obj.media.first()
+        return media.url if media else None
+
     class Meta:
         model = Product
         fields = [
-            "id", "sku", "name", "name_fr", "name_en", "category", "base_unit",
+            "id", "sku", "name", "name_fr", "name_en",
+            "category", "category_name",
+            "base_unit",
             "cost", "floor_price", "retail_price",
             "reseller_price", "wholesale_price", "public_price",
-            "status", "is_published_online",
+            # aliases frontend
+            "price_floor", "price_retail", "price_reseller", "price_wholesale", "price_public",
+            "status", "is_active", "is_published_online",
+            "stock_total", "stock_at_location",
+            "thumbnail", "primary_barcode", "barcode",
             "created_at", "updated_at",
         ]
-        # sku auto-généré par tenant (cf. Product.save).
         read_only_fields = ["id", "sku", "created_at", "updated_at"]
 
     def validate_category(self, value):
         return self._check_same_tenant(value, "Catégorie")
+
+    def validate_barcode(self, value):
+        """Refuse un code déjà utilisé par un autre produit du tenant."""
+        value = (value or "").strip()
+        if not value:
+            return value
+        tenant = getattr(self.context.get("request"), "tenant", None)
+        qs = ProductBarcode.objects.filter(tenant=tenant, code=value)
+        if self.instance is not None:
+            qs = qs.exclude(product=self.instance)
+        if qs.exists():
+            raise serializers.ValidationError("Ce code-barres est déjà associé à un autre produit.")
+        return value
+
+    def _attach_barcode(self, product, code):
+        if not code:
+            return
+        ProductBarcode.objects.get_or_create(
+            tenant=product.tenant,
+            code=code,
+            defaults={"product": product, "is_primary": True},
+        )
+
+    def create(self, validated_data):
+        code = validated_data.pop("barcode", "")
+        product = super().create(validated_data)
+        self._attach_barcode(product, code)
+        return product
+
+    def update(self, instance, validated_data):
+        code = validated_data.pop("barcode", None)
+        product = super().update(instance, validated_data)
+        if code is not None:
+            self._attach_barcode(product, code.strip())
+        return product
 
 
 class ProductBarcodeSerializer(TenantScopedSerializer):
@@ -110,8 +181,31 @@ class MediaAssetSerializer(TenantScopedSerializer):
 class LocationSerializer(TenantScopedSerializer):
     class Meta:
         model = Location
-        fields = ["id", "name", "name_fr", "name_en", "type", "is_default", "created_at", "updated_at"]
+        fields = [
+            "id", "name", "name_fr", "name_en", "type", "is_default",
+            # Surcharges de la config tenant (vide = hérite de TenantSettings)
+            "contact_phone", "whatsapp_number", "contact_email",
+            "address", "receipt_footer", "email_signature",
+            "created_at", "updated_at",
+        ]
         read_only_fields = ["id", "created_at", "updated_at"]
+
+    def _ensure_single_default(self, instance):
+        """Un seul emplacement par défaut par tenant."""
+        if instance.is_default:
+            Location.objects.filter(tenant=instance.tenant, is_default=True).exclude(
+                pk=instance.pk
+            ).update(is_default=False)
+
+    def create(self, validated_data):
+        instance = super().create(validated_data)
+        self._ensure_single_default(instance)
+        return instance
+
+    def update(self, instance, validated_data):
+        instance = super().update(instance, validated_data)
+        self._ensure_single_default(instance)
+        return instance
 
 
 class UnitConversionSerializer(TenantScopedSerializer):
