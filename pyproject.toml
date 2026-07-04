@@ -12,4 +12,9 @@ dependencies = [
     "redis>=5.0.0",
     "requests>=2.32.0",
     "django-modeltranslation>=0.19.0",
+    "djangorestframework-simplejwt>=5.5.1",
+    "python-dotenv>=1.2.2",
+    "django-cors-headers>=4.9.0",
+    "psycopg[binary]>=3.2.0",
+    "phonenumbers>=9.0.34",
 ]

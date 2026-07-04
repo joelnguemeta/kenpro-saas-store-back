@@ -2,9 +2,11 @@ from drf_spectacular.utils import OpenApiExample, OpenApiResponse, extend_schema
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.generics import CreateAPIView
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework_simplejwt.tokens import RefreshToken
 
 from kenpro_store.enums import ErrorCode, SuccessMessage
 from kenpro_store.responses import ErrorResponse, SuccessResponse
@@ -12,15 +14,19 @@ from kenpro_store.responses import ErrorResponse, SuccessResponse
 from .models import Membership, PinScope, Plan, Role, ServiceFlag, Subscription, Tenant, User
 from .serializers import (
     ActivateSerializer,
+    CreateOrganizationSerializer,
     ExtendTrialSerializer,
+    InviteMemberSerializer,
     MembershipSerializer,
     PasswordChangeSerializer,
     PasswordResetConfirmSerializer,
     PasswordResetRequestSerializer,
+    PermissionSerializer,
     PinResetConfirmSerializer,
     PinResetRequestSerializer,
     PinScopeSerializer,
     PlanSerializer,
+    RegisterOrganizationSerializer,
     RegisterSerializer,
     RoleSerializer,
     ServiceFlagInputSerializer,
@@ -33,6 +39,7 @@ from .serializers import (
     UserSerializer,
     VerifyPinSerializer,
 )
+from .permissions import IsStaffOrTenantManager, user_tenant_ids
 from .services import (
     MembershipService,
     PasswordChangeService,
@@ -86,6 +93,52 @@ _detail_response = OpenApiResponse(
         ),
     ],
 )
+class LoginView(APIView):
+    """Authentification par téléphone + mot de passe. Retourne les tokens JWT + profil complet."""
+
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        from django.contrib.auth import authenticate
+
+        from .phone import normalize_phone_or_none
+
+        raw_phone = request.data.get("phone", "").strip()
+        password = request.data.get("password", "")
+
+        # Normalisation E.164 : « 655 11 22 33 », « +237 6 55 11 22 33 » et
+        # « 00237655112233 » se connectent tous au même compte.
+        phone = normalize_phone_or_none(raw_phone) or raw_phone
+
+        user = authenticate(request, username=phone, password=password)
+        # Repli : comptes créés avant la normalisation (numéro brut en base)
+        if user is None and phone != raw_phone:
+            user = authenticate(request, username=raw_phone, password=password)
+        if user is None:
+            return ErrorResponse(
+                message="Identifiants incorrects.",
+                error_code=ErrorCode.UNAUTHORIZED,
+                status_code=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        refresh = RefreshToken.for_user(user)
+        membership = (
+            Membership.objects.filter(user=user, is_active=True)
+            .select_related("tenant", "role")
+            .prefetch_related("role__role_permissions__permission__content_type")
+            .first()
+        )
+
+        data = {
+            "access": str(refresh.access_token),
+            "refresh": str(refresh),
+            "user": UserSerializer(user).data,
+            "membership": MembershipSerializer(membership).data if membership else None,
+            "tenant": TenantSerializer(membership.tenant).data if membership else None,
+        }
+        return SuccessResponse(data=data, message=SuccessMessage.OPERATION_SUCCESSFUL)
+
+
 class PasswordResetRequestView(APIView):
     permission_classes = [AllowAny]
 
@@ -297,6 +350,86 @@ class RegisterView(CreateAPIView):
         )
 
 
+@extend_schema(
+    summary="Créer une organisation",
+    description=(
+        "Inscrit un nouvel utilisateur ET crée sa boutique (tenant) en une seule opération. "
+        "L'utilisateur devient automatiquement « Admin boutique » avec accès complet. "
+        "Le mot de passe est obligatoire pour ce parcours."
+    ),
+    request=RegisterOrganizationSerializer,
+    responses={
+        201: MembershipSerializer,
+        400: OpenApiResponse(description="Numéro déjà utilisé ou données invalides."),
+    },
+    tags=["Inscription"],
+    examples=[
+        OpenApiExample(
+            "Exemple",
+            request_only=True,
+            value={
+                "phone": "+237600000001",
+                "full_name": "Alice Mbida",
+                "email": "alice@example.com",
+                "password": "motdepasse123",
+                "organization_name": "Boutique Alice",
+                "country": "CM",
+                "currency": "XAF",
+            },
+        ),
+    ],
+)
+class RegisterOrganizationView(CreateAPIView):
+    serializer_class = RegisterOrganizationSerializer
+    permission_classes = [AllowAny]
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        membership = serializer.save()
+        return SuccessResponse(
+            data=MembershipSerializer(membership).data,
+            message=SuccessMessage.CREATED,
+            status_code=status.HTTP_201_CREATED,
+        )
+
+
+@extend_schema(
+    summary="Créer ma boutique (onboarding)",
+    description=(
+        "Crée la boutique (tenant) de l'utilisateur connecté. "
+        "Il en devient « Admin boutique » avec accès complet. "
+        "Utilisé par l'écran d'onboarding après la première connexion."
+    ),
+    request=CreateOrganizationSerializer,
+    responses={
+        201: MembershipSerializer,
+        400: OpenApiResponse(description="Données invalides."),
+    },
+    tags=["Inscription"],
+    examples=[
+        OpenApiExample(
+            "Exemple",
+            request_only=True,
+            value={"organization_name": "Boutique Alice", "country": "CM", "currency": "XAF"},
+        ),
+    ],
+)
+class CreateOrganizationView(CreateAPIView):
+    serializer_class = CreateOrganizationSerializer
+    permission_classes = [IsAuthenticated]
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        membership = serializer.save()
+        return SuccessResponse(
+            data=MembershipSerializer(membership).data,
+            message=SuccessMessage.CREATED,
+            status_code=status.HTTP_201_CREATED,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Users
 # ---------------------------------------------------------------------------
@@ -465,10 +598,89 @@ class TenantViewSet(_SuccessModelViewSet):
 )
 class RoleViewSet(_SuccessModelViewSet):
     queryset = Role.objects.select_related("tenant").prefetch_related(
-        "role_permissions__permission"
+        "role_permissions__permission__content_type"
     ).order_by("name")
     serializer_class = RoleSerializer
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsStaffOrTenantManager]
+
+    def _is_staff(self):
+        u = self.request.user
+        return u.is_staff or u.is_superuser
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        if self._is_staff():
+            return qs
+        # Un gérant ne voit que les rôles de SES boutiques — les rôles globaux
+        # (tenant=NULL) sont un concept plateforme, non modifiables par lui.
+        return qs.filter(tenant_id__in=user_tenant_ids(self.request.user))
+
+    def _check_tenant_scope(self, tenant):
+        """Un gestionnaire non-staff ne manipule que les rôles de SES tenants."""
+        if self._is_staff():
+            return
+        if tenant is None or tenant.id not in set(user_tenant_ids(self.request.user)):
+            raise PermissionDenied("Vous ne pouvez gérer que les rôles de votre boutique.")
+
+    def perform_create(self, serializer):
+        self._check_tenant_scope(serializer.validated_data.get("tenant"))
+        serializer.save()
+
+    def perform_update(self, serializer):
+        instance = serializer.instance
+        if not instance.is_editable:
+            raise PermissionDenied("Ce rôle n'est pas modifiable.")
+        self._check_tenant_scope(instance.tenant)
+        self._check_tenant_scope(serializer.validated_data.get("tenant", instance.tenant))
+        serializer.save()
+
+    def perform_destroy(self, instance):
+        if instance.is_system:
+            raise PermissionDenied("Un rôle système ne peut pas être supprimé.")
+        self._check_tenant_scope(instance.tenant)
+        instance.delete()
+
+
+@extend_schema_view(
+    list=extend_schema(
+        summary="Lister les permissions disponibles",
+        description=(
+            "Retourne les permissions Django des modules métier, "
+            "utilisées pour composer les rôles."
+        ),
+        tags=["Rôles"],
+    ),
+    retrieve=extend_schema(summary="Détail d'une permission", tags=["Rôles"]),
+)
+class PermissionViewSet(viewsets.ReadOnlyModelViewSet):
+    """Catalogue des permissions attribuables aux rôles (modules métier uniquement)."""
+
+    BUSINESS_APPS = ["inventory", "sales", "crm", "supplier", "repair", "mobilemoney", "accounts"]
+
+    serializer_class = PermissionSerializer
+    permission_classes = [IsStaffOrTenantManager]
+    pagination_class = None
+
+    # Dans l'app accounts, seuls ces modèles sont pertinents pour composer
+    # un rôle boutique (le reste — tenant, plan, subscription… — est réservé
+    # à la plateforme).
+    ACCOUNTS_MODELS = ["role", "membership", "pinscope"]
+
+    def get_queryset(self):
+        from django.contrib.auth.models import Permission
+        from django.db.models import Q
+        return (
+            Permission.objects.filter(
+                Q(content_type__app_label__in=[a for a in self.BUSINESS_APPS if a != "accounts"])
+                | Q(content_type__app_label="accounts", content_type__model__in=self.ACCOUNTS_MODELS)
+            )
+            .select_related("content_type")
+            .order_by("content_type__app_label", "codename")
+        )
+
+    def list(self, request, *args, **kwargs):
+        serializer = self.get_serializer(self.get_queryset(), many=True)
+        return SuccessResponse(data=serializer.data, message=SuccessMessage.OPERATION_SUCCESSFUL)
 
 
 # ---------------------------------------------------------------------------
@@ -507,15 +719,97 @@ class RoleViewSet(_SuccessModelViewSet):
     ),
 )
 class MembershipViewSet(_SuccessModelViewSet):
-    queryset = Membership.objects.select_related("user", "tenant", "role").order_by("created_at")
+    queryset = (
+        Membership.objects.select_related("user", "tenant", "role")
+        .prefetch_related("role__role_permissions__permission__content_type")
+        .order_by("created_at")
+    )
     serializer_class = MembershipSerializer
 
     def get_permissions(self):
         # PIN actions are available to authenticated users (own membership only).
-        # All CRUD operations require staff.
+        # CRUD operations require staff OR a tenant manager (scoped to their tenant).
         if self.action in ("set_pin", "clear_pin", "verify_pin"):
             return [IsAuthenticated()]
-        return [IsAdminUser()]
+        return [IsStaffOrTenantManager()]
+
+    def _is_staff(self):
+        u = self.request.user
+        return u.is_staff or u.is_superuser
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        if self._is_staff():
+            return qs
+        # Gestionnaire non-staff : uniquement les membres de SES tenants
+        return qs.filter(tenant_id__in=user_tenant_ids(self.request.user))
+
+    def _check_scope(self, tenant, role):
+        """Un gestionnaire non-staff reste confiné à ses tenants et leurs rôles."""
+        if self._is_staff():
+            return
+        tenant_ids = set(user_tenant_ids(self.request.user))
+        if tenant is None or tenant.id not in tenant_ids:
+            raise PermissionDenied("Vous ne pouvez gérer que les membres de votre boutique.")
+        if role is not None and role.tenant_id is not None and role.tenant_id not in tenant_ids:
+            raise PermissionDenied("Ce rôle appartient à une autre boutique.")
+
+    def perform_create(self, serializer):
+        self._check_scope(
+            serializer.validated_data.get("tenant"),
+            serializer.validated_data.get("role"),
+        )
+        serializer.save()
+
+    def perform_update(self, serializer):
+        instance = serializer.instance
+        self._check_scope(instance.tenant, instance.role)
+        self._check_scope(
+            serializer.validated_data.get("tenant", instance.tenant),
+            serializer.validated_data.get("role", instance.role),
+        )
+        serializer.save()
+
+    def perform_destroy(self, instance):
+        self._check_scope(instance.tenant, instance.role)
+        instance.delete()
+
+    @extend_schema(
+        summary="Ajouter un membre à la boutique",
+        description=(
+            "Ajoute un membre par son numéro de téléphone. "
+            "Si le compte n'existe pas encore, il est créé sans mot de passe "
+            "(la personne le définira via « mot de passe oublié »)."
+        ),
+        request=InviteMemberSerializer,
+        responses={
+            201: MembershipSerializer,
+            400: OpenApiResponse(description="Déjà membre ou données invalides."),
+        },
+        tags=["Appartenances"],
+    )
+    @action(detail=False, methods=["post"])
+    def invite(self, request):
+        serializer = InviteMemberSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        tenant = serializer.validated_data["tenant"]
+        role = serializer.validated_data["role"]
+        self._check_scope(tenant, role)
+        try:
+            membership = MembershipService.invite(
+                phone=serializer.validated_data["phone"].strip(),
+                full_name=serializer.validated_data.get("full_name", ""),
+                email=serializer.validated_data.get("email", "").strip(),
+                tenant=tenant,
+                role=role,
+            )
+        except ValueError as exc:
+            return ErrorResponse(error_code=ErrorCode.BAD_REQUEST, message=str(exc), status_code=400)
+        return SuccessResponse(
+            data=MembershipSerializer(membership).data,
+            message=SuccessMessage.CREATED,
+            status_code=status.HTTP_201_CREATED,
+        )
 
     @extend_schema(
         summary="Définir ou changer le PIN",
@@ -834,3 +1128,221 @@ class ServiceFlagViewSet(viewsets.ReadOnlyModelViewSet):
             return ErrorResponse(error_code=ErrorCode.NOT_FOUND, message="Tenant introuvable.")
         flag = ServiceFlagService.disable(tenant, s.validated_data["service"])
         return SuccessResponse(data=ServiceFlagSerializer(flag).data, message="Service désactivé.")
+
+# ---------------------------------------------------------------------------
+# Configuration du tenant (identité commerciale : reçus, emails, WhatsApp)
+# ---------------------------------------------------------------------------
+
+class TenantSettingsView(APIView):
+    """
+    GET   : config générale du tenant actif (créée à la volée si absente).
+    PATCH : mise à jour — réservé staff plateforme ou gérant du tenant.
+
+    Les surcharges par boutique se font sur Location
+    (PATCH /inventory/locations/{id}/ : contact_phone, whatsapp_number…).
+    """
+    permission_classes = [IsAuthenticated]
+
+    def _get_settings(self, request):
+        from .models import TenantSettings
+        tenant = getattr(request, "tenant", None)
+        if tenant is None:
+            return None
+        obj, _ = TenantSettings.objects.get_or_create(tenant=tenant)
+        return obj
+
+    @extend_schema(
+        summary="Configuration générale du tenant",
+        tags=["Comptes"],
+    )
+    def get(self, request):
+        from .serializers import TenantSettingsSerializer
+        obj = self._get_settings(request)
+        if obj is None:
+            return ErrorResponse(error_code=ErrorCode.FORBIDDEN, message="Aucun tenant actif.")
+        return SuccessResponse(data=TenantSettingsSerializer(obj).data)
+
+    @extend_schema(
+        summary="Modifier la configuration du tenant",
+        tags=["Comptes"],
+    )
+    def patch(self, request):
+        from .serializers import TenantSettingsSerializer
+        obj = self._get_settings(request)
+        if obj is None:
+            return ErrorResponse(error_code=ErrorCode.FORBIDDEN, message="Aucun tenant actif.")
+
+        # Écriture : staff plateforme ou gérant du tenant uniquement
+        checker = IsStaffOrTenantManager()
+        if not checker.has_permission(request, self):
+            return ErrorResponse(
+                error_code=ErrorCode.FORBIDDEN,
+                message="Seul un gérant peut modifier la configuration.",
+            )
+
+        serializer = TenantSettingsSerializer(obj, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return SuccessResponse(data=serializer.data, message=SuccessMessage.UPDATED)
+
+
+class UserSearchView(APIView):
+    """
+    Recherche d'utilisateurs pour l'invitation d'un membre.
+
+    Sur PostgreSQL : similarité trigram (tolère les fautes de frappe).
+    Sur SQLite (dev) : repli sur une recherche `icontains`.
+    Réservé aux gérants/staff — ne retourne que les champs publics.
+    """
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary="Rechercher un utilisateur (similarité trigram)",
+        parameters=[],
+        tags=["Appartenances"],
+    )
+    def get(self, request):
+        checker = IsStaffOrTenantManager()
+        if not checker.has_permission(request, self):
+            return ErrorResponse(
+                error_code=ErrorCode.FORBIDDEN,
+                message="Réservé aux gérants.",
+            )
+
+        q = (request.query_params.get("q") or "").strip()
+        if len(q) < 2:
+            return SuccessResponse(data=[])
+
+        from django.db import connection
+
+        qs = User.objects.filter(is_active=True)
+
+        from django.db.models import Q
+
+        fallback = qs.filter(
+            Q(full_name__icontains=q) | Q(phone__icontains=q) | Q(email__icontains=q)
+        )
+
+        users = None
+        if connection.vendor == "postgresql":
+            # Similarité trigram — nécessite l'extension pg_trgm.
+            # Le queryset étant lazy, on force l'exécution DANS le try pour
+            # retomber proprement sur icontains si l'extension manque.
+            try:
+                from django.contrib.postgres.search import TrigramSimilarity
+                from django.db.models import functions
+
+                users = list(
+                    qs.annotate(
+                        sim=functions.Greatest(
+                            TrigramSimilarity("full_name", q),
+                            TrigramSimilarity("phone", q),
+                            TrigramSimilarity("email", q),
+                        )
+                    )
+                    .filter(sim__gt=0.15)
+                    .order_by("-sim")[:8]
+                )
+            except Exception:
+                users = None
+
+        if users is None:
+            users = list(fallback[:8])
+
+        results = [
+            {
+                "id": str(u.id),
+                "phone": u.phone,
+                "full_name": u.full_name,
+                "email": u.email,
+            }
+            for u in users
+        ]
+        return SuccessResponse(data=results)
+
+
+# ---------------------------------------------------------------------------
+# OTP — connexion par code (canal pluggable : email aujourd'hui, SMS demain)
+# ---------------------------------------------------------------------------
+
+class OtpRequestView(APIView):
+    permission_classes = [AllowAny]
+
+    @extend_schema(
+        summary="Demander un code de connexion (OTP)",
+        description=(
+            "Envoie un code à usage unique via le canal actif (email par défaut). "
+            "Réponse volontairement générique pour ne pas révéler l'existence d'un compte."
+        ),
+        tags=["Connexion"],
+    )
+    def post(self, request):
+        from .services import OtpService
+
+        phone = (request.data.get("phone") or "").strip()
+        channel = request.data.get("channel")  # optionnel : "email", "sms"…
+        if not phone:
+            return ErrorResponse(error_code=ErrorCode.BAD_REQUEST, message="Numéro requis.")
+
+        try:
+            info = OtpService.request_code(phone, channel_name=channel)
+        except ValueError:
+            # Ne révèle pas si le compte existe — réponse générique
+            return SuccessResponse(
+                data={"channel": channel or "email", "masked_destination": None},
+                message="Si un compte existe pour ce numéro, un code a été envoyé.",
+            )
+        except Exception:
+            return ErrorResponse(
+                error_code=ErrorCode.INTERNAL_ERROR,
+                message="Envoi du code impossible. Réessayez plus tard.",
+                status_code=500,
+            )
+
+        return SuccessResponse(
+            data=info,
+            message="Si un compte existe pour ce numéro, un code a été envoyé.",
+        )
+
+
+class OtpVerifyView(APIView):
+    permission_classes = [AllowAny]
+
+    @extend_schema(
+        summary="Vérifier le code OTP et se connecter",
+        description="Valide le code reçu et retourne les tokens JWT + profil (même payload que le login).",
+        tags=["Connexion"],
+    )
+    def post(self, request):
+        from .services import OtpService
+
+        phone = (request.data.get("phone") or "").strip()
+        code = (request.data.get("code") or "").strip()
+        if not phone or not code:
+            return ErrorResponse(error_code=ErrorCode.BAD_REQUEST, message="Numéro et code requis.")
+
+        try:
+            user = OtpService.verify_code(phone, code)
+        except ValueError as exc:
+            return ErrorResponse(
+                error_code=ErrorCode.UNAUTHORIZED,
+                message=str(exc),
+                status_code=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        # Même payload que LoginView — le frontend réutilise son flux
+        refresh = RefreshToken.for_user(user)
+        membership = (
+            Membership.objects.filter(user=user, is_active=True)
+            .select_related("tenant", "role")
+            .prefetch_related("role__role_permissions__permission__content_type")
+            .first()
+        )
+        data = {
+            "access": str(refresh.access_token),
+            "refresh": str(refresh),
+            "user": UserSerializer(user).data,
+            "membership": MembershipSerializer(membership).data if membership else None,
+            "tenant": TenantSerializer(membership.tenant).data if membership else None,
+        }
+        return SuccessResponse(data=data, message=SuccessMessage.OPERATION_SUCCESSFUL)

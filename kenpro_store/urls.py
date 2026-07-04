@@ -17,11 +17,13 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import include, path
 from drf_spectacular.views import SpectacularAPIView, SpectacularRedocView, SpectacularSwaggerView
+from rest_framework_simplejwt.views import TokenRefreshView
 
 from .views import DashboardView, FiscalReportView
 
 urlpatterns = [
     path("admin/", admin.site.urls),
+    path("api/v1/accounts/token/refresh/", TokenRefreshView.as_view(), name="token-refresh"),
     path("api/v1/dashboard/", DashboardView.as_view(), name="dashboard"),
     path("api/v1/fiscal/report/", FiscalReportView.as_view(), name="fiscal-report"),
     path("api/v1/accounts/", include("accounts.urls")),

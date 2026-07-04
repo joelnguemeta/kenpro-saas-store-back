@@ -11,9 +11,14 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 """
 
 import os
+from datetime import timedelta
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+load_dotenv(BASE_DIR / ".env")
 
 SECRET_KEY = os.environ["DJANGO_SECRET_KEY"]
 
@@ -33,7 +38,9 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     # Tiers
+    'corsheaders',
     'rest_framework',
+    'rest_framework_simplejwt',
     'drf_spectacular',
     'django_celery_beat',
     # Apps KENPRO
@@ -50,6 +57,7 @@ INSTALLED_APPS = [
 AUTH_USER_MODEL = "accounts.User"
 
 MIDDLEWARE = [
+    'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.locale.LocaleMiddleware',
@@ -70,13 +78,31 @@ MIDDLEWARE = [
 # Renseigné = mode on-premise : un seul tenant pour ce déploiement.
 SINGLE_TENANT_SLUG = os.environ.get("SINGLE_TENANT_SLUG", "")
 
+# ---------------------------------------------------------------------------
+# CORS
+# ---------------------------------------------------------------------------
+CORS_ALLOWED_ORIGINS = [
+    o.strip()
+    for o in os.environ.get("CORS_ALLOWED_ORIGINS", "http://localhost:3000").split(",")
+    if o.strip()
+]
+CORS_ALLOW_CREDENTIALS = True
+
+# Autorise le header de résolution de tenant envoyé par le frontend
+from corsheaders.defaults import default_headers  # noqa: E402
+
+CORS_ALLOW_HEADERS = [*default_headers, "x-tenant-slug"]
+
 # Chemins qui ne nécessitent pas de tenant résolu.
 TENANT_EXEMPT_PATHS = [
     "/admin/",
     "/api/schema/",
     "/api/docs/",
     "/api/redoc/",
+    "/api/v1/accounts/login/",
     "/api/v1/accounts/register/",
+    "/api/v1/accounts/organizations/",
+    "/api/v1/accounts/token/",
     "/api/v1/accounts/password-reset/",
     "/api/v1/accounts/password/change/",
     "/api/v1/accounts/pin-reset/",
@@ -89,11 +115,25 @@ PASSWORD_RESET_TOKEN_TTL_MINUTES = 15
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "https://app.kenpro.cm")
 
 # ---------------------------------------------------------------------------
+# Email (SMTP — Mailpit en dev, capture tous les messages)
+# ---------------------------------------------------------------------------
+EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+EMAIL_HOST = os.environ.get("EMAIL_HOST", "localhost")
+EMAIL_PORT = int(os.environ.get("EMAIL_PORT", "1025"))
+EMAIL_HOST_USER = os.environ.get("EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD = os.environ.get("EMAIL_HOST_PASSWORD", "")
+EMAIL_USE_TLS = os.environ.get("EMAIL_USE_TLS", "False") == "True"
+DEFAULT_FROM_EMAIL = os.environ.get("DEFAULT_FROM_EMAIL", "no-reply@kenpro.cm")
+
+# ---------------------------------------------------------------------------
 # Celery
 # ---------------------------------------------------------------------------
 CELERY_BROKER_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 CELERY_RESULT_BACKEND = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 CELERY_TIMEZONE = "Africa/Douala"
+
+# Indicatif pays par défaut pour interpréter les numéros locaux (ISO alpha-2)
+DEFAULT_PHONE_REGION = os.environ.get("DEFAULT_PHONE_REGION", "CM")
 CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
 
 # ---------------------------------------------------------------------------
@@ -130,12 +170,24 @@ WSGI_APPLICATION = 'kenpro_store.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/6.0/ref/settings/#databases
 
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+if os.environ.get("POSTGRES_DB"):
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': os.environ["POSTGRES_DB"],
+            'USER': os.environ.get("POSTGRES_USER", "postgres"),
+            'PASSWORD': os.environ.get("POSTGRES_PASSWORD", ""),
+            'HOST': os.environ.get("POSTGRES_HOST", "localhost"),
+            'PORT': os.environ.get("POSTGRES_PORT", "5432"),
+        }
     }
-}
+else:
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': os.environ.get("DJANGO_DB_PATH", BASE_DIR / 'db.sqlite3'),
+        }
+    }
 
 
 # Password validation
@@ -185,6 +237,10 @@ STATIC_URL = 'static/'
 # Django REST Framework
 # ---------------------------------------------------------------------------
 REST_FRAMEWORK = {
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "rest_framework_simplejwt.authentication.JWTAuthentication",
+        "rest_framework.authentication.SessionAuthentication",
+    ],
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
     "DEFAULT_PAGINATION_CLASS": "kenpro_store.pagination.CustomPagination",
     "PAGE_SIZE": 10,
@@ -193,7 +249,25 @@ REST_FRAMEWORK = {
     # Évite les ValueError sur request.user = AnonymousUser dans les perform_create.
     "DEFAULT_PERMISSION_CLASSES": [
         "rest_framework.permissions.IsAuthenticated",
+        # Enforcement des rôles Kenpro : mappe la méthode HTTP sur la permission
+        # Django du modèle de la vue (view/add/change/delete). No-op sans modèle.
+        "accounts.permissions.RoleModelPermissions",
     ],
+}
+
+# ---------------------------------------------------------------------------
+# SimpleJWT
+# ---------------------------------------------------------------------------
+from datetime import timedelta
+
+SIMPLE_JWT = {
+    "ACCESS_TOKEN_LIFETIME": timedelta(hours=8),
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=30),
+    "ROTATE_REFRESH_TOKENS": True,
+    "BLACKLIST_AFTER_ROTATION": False,
+    "USER_ID_FIELD": "id",
+    "USER_ID_CLAIM": "user_id",
+    "AUTH_HEADER_TYPES": ("Bearer",),
 }
 
 # ---------------------------------------------------------------------------

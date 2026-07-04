@@ -24,6 +24,9 @@ class User(AbstractBaseUser, PermissionsMixin):
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
     date_joined = models.DateTimeField(default=timezone.now)
+    # Vrai pour les comptes créés par invitation avec mot de passe généré :
+    # l'utilisateur doit définir son propre mot de passe à la première connexion.
+    must_change_password = models.BooleanField(default=False)
 
     USERNAME_FIELD = "phone"
     REQUIRED_FIELDS = []
@@ -59,6 +62,40 @@ class Tenant(models.Model):
 
     def __str__(self):
         return self.name
+
+
+class TenantSettings(models.Model):
+    """
+    Configuration générale du tenant : identité commerciale utilisée sur les
+    reçus, emails et messages WhatsApp. Chaque boutique (Location) peut
+    surcharger ces valeurs champ par champ — vide sur la boutique = hérite
+    d'ici (cf. kenpro_store.branding.effective_settings).
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.OneToOneField(Tenant, on_delete=models.CASCADE, related_name="settings")
+
+    # Nom commercial affiché (défaut : tenant.name)
+    display_name = models.CharField(max_length=255, blank=True)
+    contact_phone = models.CharField(max_length=32, blank=True)
+    whatsapp_number = models.CharField(max_length=32, blank=True)
+    contact_email = models.EmailField(blank=True)
+    address = models.CharField(max_length=255, blank=True)
+    # Message en bas des reçus (WhatsApp, impression)
+    receipt_footer = models.CharField(
+        max_length=255, blank=True, default="Merci pour votre confiance ! 🙏"
+    )
+    # Signature ajoutée aux emails sortants
+    email_signature = models.TextField(blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Configuration tenant"
+        verbose_name_plural = "Configurations tenant"
+
+    def __str__(self):
+        return f"Config — {self.tenant.name}"
 
 
 class Plan(models.Model):
@@ -389,3 +426,39 @@ class PinResetToken(models.Model):
     @property
     def is_valid(self) -> bool:
         return not self.used and timezone.now() <= self.expires_at
+
+
+class OtpCode(models.Model):
+    """
+    Code de connexion à usage unique (OTP), envoyé via un canal pluggable
+    (cf. accounts.otp_channels). Le code est stocké haché — jamais en clair.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="otp_codes")
+    # Canal utilisé pour l'envoi ("email", "sms"…) — informatif/audit
+    channel = models.CharField(max_length=20, default="email")
+    # SHA-256 du code — jamais le code brut en DB
+    code_hash = models.CharField(max_length=64)
+    expires_at = models.DateTimeField()
+    used_at = models.DateTimeField(null=True, blank=True)
+    attempts = models.PositiveSmallIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    MAX_ATTEMPTS = 5
+
+    class Meta:
+        verbose_name = "Code OTP"
+        verbose_name_plural = "Codes OTP"
+        indexes = [models.Index(fields=["user", "expires_at"])]
+
+    @staticmethod
+    def hash_code(raw: str) -> str:
+        return hashlib.sha256(raw.encode()).hexdigest()
+
+    @property
+    def is_valid(self) -> bool:
+        return (
+            self.used_at is None
+            and self.attempts < self.MAX_ATTEMPTS
+            and timezone.now() < self.expires_at
+        )
