@@ -22,11 +22,19 @@ class PaymentSerializer(serializers.ModelSerializer):
 
 
 class SaleLineSerializer(serializers.ModelSerializer):
+    product_name = serializers.CharField(source="product.name", read_only=True)
+    total_price = serializers.SerializerMethodField()
+    unit_price = serializers.DecimalField(source="final_price", max_digits=14, decimal_places=2, read_only=True)
+
+    def get_total_price(self, obj):
+        return str(obj.final_price * obj.quantity)
+
     class Meta:
         model = SaleLine
         fields = [
-            "id", "sale", "product", "quantity", "unit",
+            "id", "sale", "product", "product_name", "quantity", "unit",
             "floor_price", "catalog_price", "final_price",
+            "unit_price", "total_price",
             "line_adjustment", "adjusted_by",
             "created_at", "updated_at",
         ]
@@ -37,13 +45,34 @@ class SaleSerializer(serializers.ModelSerializer):
     """Détail complet d'une vente avec lignes et paiements imbriqués."""
     lines = SaleLineSerializer(many=True, read_only=True)
     payments = PaymentSerializer(many=True, read_only=True)
+    customer_name = serializers.CharField(source="customer.name", read_only=True, default=None)
+    total_amount = serializers.DecimalField(source="total", max_digits=14, decimal_places=2, read_only=True)
+    paid_amount = serializers.SerializerMethodField()
+    balance_due = serializers.SerializerMethodField()
+
+    def get_paid_amount(self, obj):
+        from django.db.models import Sum
+        from decimal import Decimal
+        total = obj.payments.filter(status=Payment.Status.CONFIRMED).aggregate(
+            s=Sum("amount")
+        )["s"] or Decimal("0")
+        return str(total)
+
+    def get_balance_due(self, obj):
+        from django.db.models import Sum
+        from decimal import Decimal
+        paid = obj.payments.filter(status=Payment.Status.CONFIRMED).aggregate(
+            s=Sum("amount")
+        )["s"] or Decimal("0")
+        return str(max(Decimal("0"), obj.total - paid))
 
     class Meta:
         model = Sale
         fields = [
-            "id", "reference", "channel", "customer", "seller",
+            "id", "reference", "channel", "customer", "customer_name", "seller",
             "location", "status",
             "subtotal", "total_discount", "total",
+            "total_amount", "paid_amount", "balance_due",
             "validated_at",
             "lines", "payments",
             "created_at", "updated_at",
@@ -51,6 +80,7 @@ class SaleSerializer(serializers.ModelSerializer):
         read_only_fields = [
             "id", "reference", "seller", "status",
             "subtotal", "total_discount", "total",
+            "total_amount", "paid_amount", "balance_due",
             "validated_at", "lines", "payments",
             "created_at", "updated_at",
         ]
@@ -58,12 +88,33 @@ class SaleSerializer(serializers.ModelSerializer):
 
 class SaleListSerializer(serializers.ModelSerializer):
     """Version allégée pour les listes (sans lignes ni paiements)."""
+    customer_name = serializers.CharField(source="customer.name", read_only=True, default=None)
+    total_amount = serializers.DecimalField(source="total", max_digits=14, decimal_places=2, read_only=True)
+    paid_amount = serializers.SerializerMethodField()
+    balance_due = serializers.SerializerMethodField()
+
+    def get_paid_amount(self, obj):
+        from django.db.models import Sum
+        from decimal import Decimal
+        total = obj.payments.filter(status=Payment.Status.CONFIRMED).aggregate(
+            s=Sum("amount")
+        )["s"] or Decimal("0")
+        return str(total)
+
+    def get_balance_due(self, obj):
+        from django.db.models import Sum
+        from decimal import Decimal
+        paid = obj.payments.filter(status=Payment.Status.CONFIRMED).aggregate(
+            s=Sum("amount")
+        )["s"] or Decimal("0")
+        return str(max(Decimal("0"), obj.total - paid))
 
     class Meta:
         model = Sale
         fields = [
-            "id", "reference", "channel", "customer",
-            "seller", "location", "status", "total",
+            "id", "reference", "channel", "customer", "customer_name",
+            "seller", "location", "status",
+            "total", "total_amount", "paid_amount", "balance_due",
             "validated_at", "created_at",
         ]
         read_only_fields = fields

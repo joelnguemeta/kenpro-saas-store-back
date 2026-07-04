@@ -17,11 +17,21 @@ from .models import Sale
 
 
 def _format_receipt(sale: Sale) -> str:
-    """Compose le texte du reçu en français, lisible sur mobile."""
-    tenant_name = sale.tenant.name
+    """
+    Compose le texte du reçu en français, lisible sur mobile.
+    Utilise l'identité effective de la boutique : nom commercial, adresse,
+    téléphone et pied de reçu peuvent être surchargés par Location.
+    """
+    from kenpro_store.branding import effective_settings
+
+    cfg = effective_settings(sale.tenant, location=sale.location)
     lines = []
 
-    lines.append(f"🧾 *Reçu — {tenant_name}*")
+    lines.append(f"🧾 *Reçu — {cfg['display_name']}*")
+    if cfg["address"]:
+        lines.append(cfg["address"])
+    if cfg["contact_phone"]:
+        lines.append(f"Tél : {cfg['contact_phone']}")
     lines.append(f"N° {sale.reference or str(sale.id)[:8].upper()}")
     lines.append(
         f"Date : {timezone.localtime(sale.validated_at).strftime('%d/%m/%Y %H:%M')
@@ -51,7 +61,7 @@ def _format_receipt(sale: Sale) -> str:
             lines.append(f"  ✓ {p.get_method_display()} : {amt:,} {sale.tenant.currency}".replace(",", " "))
 
     lines.append("")
-    lines.append(f"Merci pour votre confiance ! 🙏")
+    lines.append(cfg["receipt_footer"] or "Merci pour votre confiance ! 🙏")
 
     return "\n".join(lines)
 
@@ -90,9 +100,12 @@ def catalog_share_link(tenant) -> dict:
     Construit le lien partageable vers le catalogue en ligne du tenant (F-29).
     Le frontend sert la page catalogue à /boutique/{slug}.
     """
+    from kenpro_store.branding import effective_settings
+
+    cfg = effective_settings(tenant)
     frontend_url = getattr(settings, "FRONTEND_URL", "https://app.kenpro.cm").rstrip("/")
     url = f"{frontend_url}/boutique/{tenant.slug}"
-    text = f"🛍️ Découvrez notre boutique *{tenant.name}* !\n{url}"
+    text = f"🛍️ Découvrez notre boutique *{cfg['display_name']}* !\n{url}"
     encoded = quote(text)
     whatsapp_url = f"https://wa.me/?text={encoded}"
 

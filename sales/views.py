@@ -115,6 +115,11 @@ class SaleViewSet(TenantScopedViewSet):
     )
     @action(detail=True, methods=["post"], url_path="validate")
     def validate_sale(self, request, pk=None):
+        from django.db import transaction
+
+        from inventory.models import StockMovement
+        from inventory.services import InsufficientStock, StockLedger
+
         sale = self.get_object()
 
         if sale.status != Sale.Status.DRAFT:
@@ -123,10 +128,45 @@ class SaleViewSet(TenantScopedViewSet):
                 message=f"Seule une vente en 'draft' peut être validée (statut actuel : '{sale.status}').",
             )
 
-        # La règle d'immuabilité est gérée dans Sale.save() — on change ici
-        # depuis draft, donc ça passe.
-        sale.status = Sale.Status.VALIDATED
-        sale.save()
+        if sale.location_id is None:
+            return ErrorResponse(
+                error_code=ErrorCode.BAD_REQUEST,
+                message="La vente doit être rattachée à une boutique (location) avant validation.",
+            )
+
+        if not sale.lines.exists():
+            return ErrorResponse(
+                error_code=ErrorCode.BAD_REQUEST,
+                message="Impossible de valider une vente sans article.",
+            )
+
+        user = request.user if request.user.is_authenticated else None
+
+        try:
+            with transaction.atomic():
+                # Décrémente le stock de la boutique — refuse la survente.
+                for line in sale.lines.select_related("product"):
+                    StockLedger.record_movement(
+                        tenant=sale.tenant,
+                        product=line.product,
+                        location=sale.location,
+                        type=StockMovement.OUT,
+                        quantity=line.quantity,
+                        unit=line.unit,
+                        reason=f"Vente {sale.reference or str(sale.id)[:8].upper()}",
+                        reference=str(sale.id),
+                        created_by=user,
+                    )
+
+                # La règle d'immuabilité est gérée dans Sale.save() — on change
+                # ici depuis draft, donc ça passe.
+                sale.status = Sale.Status.VALIDATED
+                sale.save()
+        except InsufficientStock as exc:
+            return ErrorResponse(
+                error_code=ErrorCode.BAD_REQUEST,
+                message=f"Stock insuffisant : {exc}",
+            )
 
         full = SaleSerializer(sale, context=self.get_serializer_context())
         return SuccessResponse(data=full.data, message="Vente validée.")
