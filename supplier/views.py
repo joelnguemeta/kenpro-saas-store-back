@@ -52,8 +52,10 @@ class SupplierViewSet(viewsets.ModelViewSet):
     ordering_fields = ["name", "created_at"]
 
     def get_permissions(self):
-        # Read-only for any authenticated user; mutations require staff.
-        if self.action in ("list", "retrieve"):
+        # Lecture + création : tout membre authentifié (un gérant ajoute ses
+        # fournisseurs). Modification/suppression : staff uniquement — l'entité
+        # est globale, un tenant ne doit pas altérer les données des autres.
+        if self.action in ("list", "retrieve", "create"):
             return [IsAuthenticated()]
         return [IsAdminUser()]
 
@@ -71,6 +73,15 @@ class SupplierViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         self.perform_create(serializer)
+
+        # Relie automatiquement le nouveau fournisseur à la boutique du
+        # créateur — c'est le lien qui apparaît dans son écran Fournisseurs.
+        tenant = getattr(request, "tenant", None)
+        if tenant is not None:
+            SupplierLink.objects.get_or_create(
+                tenant=tenant, supplier=serializer.instance
+            )
+
         return SuccessResponse(
             data=serializer.data,
             message=SuccessMessage.CREATED,

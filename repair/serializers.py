@@ -17,10 +17,12 @@ from .models import Device, RepairTicket, StatusHistory
 # ---------------------------------------------------------------------------
 
 class DeviceSerializer(serializers.ModelSerializer):
+    customer_name = serializers.CharField(source="customer.name", read_only=True, default=None)
+
     class Meta:
         model = Device
         fields = [
-            "id", "customer", "type", "brand", "model",
+            "id", "customer", "customer_name", "type", "brand", "model",
             "imei_serial", "created_at", "updated_at",
         ]
         read_only_fields = ["id", "created_at", "updated_at"]
@@ -49,11 +51,36 @@ class RepairTicketSerializer(serializers.ModelSerializer):
     """
     # Historique imbriqué en lecture seule
     history = StatusHistorySerializer(many=True, read_only=True)
+    # Infos d'affichage (évitent des requêtes supplémentaires côté frontend)
+    customer_name = serializers.CharField(source="customer.name", read_only=True, default=None)
+    device_info = serializers.SerializerMethodField()
+    status_display = serializers.CharField(source="get_status_display", read_only=True)
+    # Transitions légales depuis le statut courant — pilote les boutons de l'UI
+    allowed_transitions = serializers.SerializerMethodField()
+
+    def get_device_info(self, obj):
+        d = obj.device
+        return {
+            "id": str(d.id),
+            "type": d.type,
+            "brand": d.brand,
+            "model": d.model,
+            "imei_serial": d.imei_serial,
+        }
+
+    def get_allowed_transitions(self, obj):
+        from .views import ALLOWED_TRANSITIONS
+        return [
+            {"value": s, "label": RepairTicket.Status(s).label}
+            for s in ALLOWED_TRANSITIONS.get(obj.status, [])
+        ]
 
     class Meta:
         model = RepairTicket
         fields = [
-            "id", "device", "customer", "declared_issue", "status",
+            "id", "device", "device_info", "customer", "customer_name",
+            "declared_issue", "status", "status_display",
+            "allowed_transitions",
             "technician", "location", "intake_at",
             "history",
             "created_at", "updated_at",
@@ -66,11 +93,25 @@ class RepairTicketListSerializer(serializers.ModelSerializer):
     Version allégée pour les listes (sans historique imbriqué).
     Évite le surcoût des N+1 sur les listes longues.
     """
+    customer_name = serializers.CharField(source="customer.name", read_only=True, default=None)
+    status_display = serializers.CharField(source="get_status_display", read_only=True)
+    device_info = serializers.SerializerMethodField()
+
+    def get_device_info(self, obj):
+        d = obj.device
+        return {
+            "id": str(d.id),
+            "type": d.type,
+            "brand": d.brand,
+            "model": d.model,
+            "imei_serial": d.imei_serial,
+        }
 
     class Meta:
         model = RepairTicket
         fields = [
-            "id", "device", "customer", "status",
+            "id", "device", "device_info", "customer", "customer_name",
+            "status", "status_display",
             "technician", "location", "intake_at",
             "created_at",
         ]

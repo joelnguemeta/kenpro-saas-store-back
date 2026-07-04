@@ -1,20 +1,15 @@
 """
 Tableau de bord tenant — agrégats temps réel (F-24 à F-27).
-
-Calculs :
-  - CA       : somme Sale.total (ventes validées sur la période)
-  - Marge    : somme (SaleLine.final_price - Product.cost) × quantity
-  - Caisse   : somme Payment.amount excluant CREDIT (paiements confirmés du jour)
-  - Dettes   : somme Customer.debt_balance > 0 pour le tenant
-  - Top ventes : produits classés par quantité vendue (période glissante)
 """
 from datetime import timedelta
 
-from django.db.models import DecimalField, ExpressionWrapper, F, FloatField, Sum
+from django.db.models import Count, DecimalField, ExpressionWrapper, F, FloatField, Sum
 from django.db.models.functions import Coalesce
 from django.utils import timezone
 
 from crm.models import Customer
+from inventory.models import Product, StockLevel
+from repair.models import RepairTicket
 from sales.models import Payment, Sale, SaleLine
 
 
@@ -43,10 +38,6 @@ def _ca(tenant, since, location=None):
 
 
 def _margin(tenant, since, location=None):
-    """
-    Marge brute = Σ (final_price - product.cost) × quantity.
-    Utilise le coût courant du produit (pas de snapshot historique en base).
-    """
     qs = SaleLine.objects.filter(
         tenant=tenant,
         sale__status=Sale.Status.VALIDATED,
@@ -63,7 +54,6 @@ def _margin(tenant, since, location=None):
 
 
 def _cash_balance(tenant, since, location=None):
-    """Encaissements réels du jour (hors crédit client)."""
     qs = Payment.objects.filter(
         tenant=tenant,
         status=Payment.Status.CONFIRMED,
@@ -96,37 +86,83 @@ def _top_products(tenant, since, limit=5, location=None):
     return [
         {
             "product_id": str(r["product__id"]),
-            "name": r["product__name"],
+            "product_name": r["product__name"],
             "sku": r["product__sku"],
-            "qty_sold": float(r["qty_sold"]),
-            "revenue": float(r["revenue"]),
+            "quantity": float(r["qty_sold"]),
+            "amount": str(round(float(r["revenue"]), 2)),
         }
         for r in rows
     ]
 
 
+def _recent_sales(tenant, limit=6, location=None):
+    qs = Sale.objects.filter(tenant=tenant).select_related("customer")
+    if location is not None:
+        qs = qs.filter(location=location)
+    rows = qs.order_by("-created_at")[:limit]
+    return [
+        {
+            "id": str(s.id),
+            "reference": s.reference or str(s.id)[:8].upper(),
+            "status": s.status,
+            "total_amount": str(s.total),
+            "customer_name": s.customer.name if s.customer else None,
+            "created_at": s.created_at.isoformat(),
+        }
+        for s in rows
+    ]
+
+
 def build_dashboard(tenant, location=None) -> dict:
-    """
-    Retourne le tableau de bord pour un tenant (global ou filtré par boutique).
-    Passer `location` (instance Location) pour les stats d'une boutique précise.
-    """
     day_start = _period_start("day")
     week_start = _period_start("week")
     month_start = _period_start("month")
 
+    sales_today_qs = Sale.objects.filter(
+        tenant=tenant,
+        status=Sale.Status.VALIDATED,
+        validated_at__gte=day_start,
+    )
+    if location:
+        sales_today_qs = sales_today_qs.filter(location=location)
+    sales_today_count = sales_today_qs.count()
+    sales_today_amount = _ca(tenant, day_start, location)
+
+    low_stock_count = StockLevel.objects.filter(
+        tenant=tenant,
+        reorder_threshold__gt=0,
+        quantity__lte=F("reorder_threshold"),
+    )
+    if location:
+        low_stock_count = low_stock_count.filter(location=location)
+    low_stock_count = low_stock_count.count()
+
+    pending_repairs = RepairTicket.objects.filter(
+        tenant=tenant,
+    ).exclude(status__in=["delivered", "cancelled"]).count()
+
     return {
         "location": {"id": str(location.id), "name": location.name} if location else None,
+        # Clés attendues par le frontend
+        "sales_today": sales_today_count,
+        "sales_today_amount": str(sales_today_amount),
+        "customers_count": Customer.objects.filter(tenant=tenant).count(),
+        "products_count": Product.objects.filter(tenant=tenant, status=Product.ACTIVE).count(),
+        "low_stock_count": low_stock_count,
+        "pending_repairs": pending_repairs,
+        "recent_sales": _recent_sales(tenant, location=location),
+        "top_products": _top_products(tenant, month_start, location=location),
+        # Détail complet pour usage futur
         "revenue": {
-            "today": _ca(tenant, day_start, location),
-            "this_week": _ca(tenant, week_start, location),
-            "this_month": _ca(tenant, month_start, location),
+            "today": str(_ca(tenant, day_start, location)),
+            "this_week": str(_ca(tenant, week_start, location)),
+            "this_month": str(_ca(tenant, month_start, location)),
         },
         "margin": {
             "today": _margin(tenant, day_start, location),
             "this_week": _margin(tenant, week_start, location),
             "this_month": _margin(tenant, month_start, location),
         },
-        "cash_collected_today": _cash_balance(tenant, day_start, location),
-        "total_customer_debt": _total_debt(tenant),
-        "top_products_this_month": _top_products(tenant, month_start, location=location),
+        "cash_collected_today": str(_cash_balance(tenant, day_start, location)),
+        "total_customer_debt": str(_total_debt(tenant)),
     }

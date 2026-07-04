@@ -23,13 +23,25 @@ class SupplierSerializer(serializers.ModelSerializer):
 
 
 class SupplierLinkSerializer(serializers.ModelSerializer):
+    # Lecture : fournisseur imbriqué ; écriture : `supplier` = UUID
+    supplier = SupplierSerializer(read_only=True)
+    supplier_id = serializers.PrimaryKeyRelatedField(
+        source="supplier", queryset=Supplier.objects.all(), write_only=True
+    )
+    current_balance = serializers.SerializerMethodField()
+
+    def get_current_balance(self, obj):
+        stmt = obj.statements.filter(status=CreditStatement.Status.OPEN).first()
+        return str(stmt.balance) if stmt else "0.00"
+
     class Meta:
         model = SupplierLink
         fields = [
-            "id", "supplier", "credit_ceiling",
+            "id", "supplier", "supplier_id", "credit_ceiling",
+            "current_balance",
             "created_at", "updated_at",
         ]
-        read_only_fields = ["id", "created_at", "updated_at"]
+        read_only_fields = ["id", "current_balance", "created_at", "updated_at"]
 
 
 class CreditEntrySerializer(serializers.ModelSerializer):
